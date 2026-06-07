@@ -91,8 +91,8 @@ action_policy_droid_nano = LazyDict(
             weight_decay=0.05,
         ),
         scheduler=dict(
-            lr_scheduler_type="LambdaCosine",
-            cycle_lengths=[100],  # smoke: 100 iters
+            lr_scheduler_type="LambdaLinear",  # matches internal droid_lerobot_8b (was LambdaCosine)
+            cycle_lengths=[100],  # smoke: 100 iters (real run sets via TOML)
             f_max=[0.4],
             f_min=[0.0],
             f_start=[0.0],
@@ -182,8 +182,8 @@ action_policy_droid_nano = LazyDict(
                             action_space="joint_pos",
                             use_state=True,
                             action_normalization=None,
-                            viewpoint="concat_view",
-                            resolution="256",
+                            viewpoint="concat_view",  # wrist 480p (top) + L/R shoulder 320x180 (bottom)
+                            resolution="480",  # 640x360 data @ 480p (matches internal res480 run)
                             max_action_dim="${model.config.max_action_dim}",
                             cfg_dropout_rate=0.1,
                             tokenizer_config="${model.config.vlm_config.tokenizer}",
@@ -197,6 +197,12 @@ action_policy_droid_nano = LazyDict(
     ),
     flags={"allow_objects": True},
 )
+
+
+# chunk_length=32 → 33 observation frames; pin the VAE encode duration to match
+# (internal used [17] for chunk_length=16). Set post-construction so it lands on
+# the deep-copied NANO_MODEL_CONFIG.tokenizer.
+action_policy_droid_nano["model"]["config"]["tokenizer"]["encode_exact_durations"] = [33]
 
 
 for _item in [action_policy_droid_nano]:
