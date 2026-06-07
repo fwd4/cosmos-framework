@@ -1,0 +1,47 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: OpenMDW-1.1
+
+# ============================================================================
+# action_policy_droid_nano — DROID action-policy SFT (Cosmos3-Nano / 8B MoT).
+#
+# Selects the registered experiment `action_policy_droid_nano`
+# (cosmos_framework/configs/base/experiment/action/posttrain_config/), which
+# wires the DROID action dataset (joint_pos 8D + use_state, raw/un-normalized —
+# same as internal droid_lerobot_8b_policy) through ActionTransformPipeline and
+# trains the generation + action heads.
+#
+# 1-node smoke (this file): 100 iters, res 256, 1 GPU. The experiment Python
+# already sets max_iter=100 / scheduler / optimizer / dataloader; the TOML only
+# overrides scalars for the smoke.
+#
+# Env required:
+#   DROID_ROOT=/fwd4/droid_plus_lerobot_640x360_20260412/success
+#   BASE_CHECKPOINT_PATH=<Cosmos3-Nano DCP dir>
+# ============================================================================
+
+[job]
+task         = "vfm"
+experiment   = "action_policy_droid_nano"
+project      = "cosmos3_action"
+group        = "action_sft"
+name         = "action_policy_droid_nano_1node_smoke"
+wandb_mode   = "disabled"
+
+[model]
+precision = "bfloat16"
+
+[model.parallelism]
+data_parallel_shard_degree     = 1   # 1 GPU smoke (set to 8 for a 1-node 8xH200 run)
+data_parallel_replicate_degree = 1
+
+[model.activation_checkpointing]
+mode           = "full"
+save_ops_regex = ["fmha"]
+
+[trainer]
+max_iter     = 100
+logging_iter = 1
+
+[checkpoint]
+load_path = "${oc.env:BASE_CHECKPOINT_PATH}"   # Cosmos3-Nano DCP dir
+save_iter = 100
