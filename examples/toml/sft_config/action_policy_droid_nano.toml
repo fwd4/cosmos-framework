@@ -38,6 +38,9 @@ data_parallel_replicate_degree = 1
 mode           = "full"
 save_ops_regex = ["fmha"]
 
+[model.tokenizer]
+vae_path = "${oc.env:WAN_VAE_PATH}"   # Wan2.2 VAE .pth (Wan-AI/Wan2.2-TI2V-5B)
+
 [trainer]
 max_iter     = 100
 logging_iter = 1
