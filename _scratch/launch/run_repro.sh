@@ -1,14 +1,19 @@
 #!/bin/bash
 # ============================================================================
 # Expanded, self-contained 1-node 8xH200 DROID action-SFT test.
-# Run AFTER the repo is cloned to /tmp/cf (the Lepton --command does:
-#   apt install git git-lfs curl ffmpeg; git clone ...; bash <this>)
-# Does: uv sync (cu130-train) -> venv checks -> dryrun -> 30-iter train
-# at res480, max_samples_per_batch=64. No `source`, no base64 — read top to
-# bottom. Markers (CLONE/UV_SYNC_OK/IMPORTS_OK/DRYRUN_EXIT/TRAIN_EXIT) make it
-# easy to see exactly where it stops.
+# The Lepton --command only clones the repo then runs this script:
+#   git clone -b <branch> <url> /tmp/cf && bash /tmp/cf/_scratch/launch/run_repro.sh
+# This script does everything else: system deps -> uv sync (cu130-train) ->
+# venv checks -> dryrun -> 30-iter train at res480, max_samples_per_batch=64.
+# No `source`, no base64 — read top to bottom. Markers
+# (UV_SYNC_OK/IMPORTS_OK/DRYRUN_EXIT/TRAIN_EXIT) show exactly where it stops.
 # ============================================================================
 set +e
+export DEBIAN_FRONTEND=noninteractive
+
+echo "########## [0/4] system deps ##########"
+apt-get update -qq && apt-get install -y -qq curl ffmpeg >/tmp/apt.log 2>&1
+echo "curl=$(command -v curl) ffmpeg=$(command -v ffmpeg)"
 
 echo "########## [1/4] uv + venv (cu130-train) ##########"
 cd /tmp/cf || { echo "NO_REPO"; exit 1; }
