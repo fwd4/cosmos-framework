@@ -2,25 +2,17 @@
 # SPDX-License-Identifier: OpenMDW-1.1
 
 # ============================================================================
-# action_policy_droid_repro — "real" DROID action-policy SFT, tuned to match
-# the internal `droid_lerobot_8b` recipe as closely as the OSS stack allows.
-#
-# Differs from action_policy_droid_nano.toml (the 100-iter smoke):
-#   - count-based batch (max_samples_per_batch) instead of token packing
-#   - grad_clip 1.0, max_iter 10000, save_iter 500  (internal values)
-#   - fresh action-head init (skip action layers on load, like internal)
-#   - 8-GPU FSDP, persistent output on NFS, wandb online
-#
-# NOTE — knobs the TOML schema can't reach (set via `--opts` at launch or a
-# Python edit to the experiment): scheduler type (lambdalinear vs LambdaCosine),
-# dataset chunk_length (16), viewpoint (wrist_view), encode_exact_durations
-# ([17]), dataset resolution. See the launch command in the recipe docstring.
+# DROID action-policy SFT — run config for the `action_policy_droid_nano`
+# experiment. The recipe knobs (optimizer/lr, scheduler type, grad_clip,
+# count-based batch, action-head skip-on-load, dataset knobs) live in the
+# registered experiment; this file only sets run-level scalars (iters, ckpt
+# cadence, parallelism shape, wandb, VAE path).
 #
 # Env required:
 #   DROID_ROOT=/path/to/droid_lerobot_640x360/success
 #   BASE_CHECKPOINT_PATH=<Cosmos3-Nano DCP dir>
 #   WAN_VAE_PATH=<Wan2.2_VAE.pth>
-#   IMAGINAIRE_OUTPUT_ROOT=/path/to/output_root   # persist ckpts on NFS
+#   IMAGINAIRE_OUTPUT_ROOT=/path/to/output_root   # persist checkpoints
 # ============================================================================
 
 [job]
@@ -35,7 +27,7 @@ wandb_mode   = "online"
 precision = "bfloat16"
 
 [model.parallelism]
-data_parallel_shard_degree     = 8    # 1-node 8xH200 (× replicate for multi-node)
+data_parallel_shard_degree     = 8    # intra-node (8x H200); set replicate for multi-node HSDP
 data_parallel_replicate_degree = 1
 
 [model.activation_checkpointing]
@@ -45,39 +37,17 @@ save_ops_regex = ["fmha"]
 [model.tokenizer]
 vae_path = "${oc.env:WAN_VAE_PATH}"
 
-[optimizer]
-lr           = 1.0e-04
-betas        = [0.9, 0.99]
-weight_decay = 0.05
-keys_to_select = ["moe_gen", "time_embedder", "vae2llm", "llm2vae", "action2llm", "llm2action", "action_modality_embed"]
-[optimizer.lr_multipliers]
-action2llm            = 5.0
-llm2action            = 5.0
-action_modality_embed = 5.0
-
 [scheduler]
-# NOTE: scheduler *type* (LambdaCosine) is set in the experiment Python; internal
-# uses lambdalinear. Override at launch with --opts scheduler.lr_scheduler_type=LambdaLinear
-cycle_lengths = [10000]
-f_max         = [0.4]
-f_min         = [0.0]
-f_start       = [0.0]
+cycle_lengths = [10000]   # match max_iter
 
 [trainer]
 max_iter     = 10000
 logging_iter = 50
 
-[trainer.callbacks.grad_clip]
-clip_norm = 1.0          # internal value (smoke used 0.1)
-
-# NOTE: count-based batch (max_samples_per_batch=128, max_sequence_length=None)
-# is set in the experiment Python recipe — TOML cannot express `null`, and the
-# loader only overrides keys present here. Override the count at launch with
-# `--opts dataloader_train.max_samples_per_batch=64` if 128 OOMs on 8xH200.
-
 [checkpoint]
 load_path = "${oc.env:BASE_CHECKPOINT_PATH}"
-save_iter = 500
-# Skip EMA (→ warm-start net_ema=net) AND the action layers, so the action
-# heads init fresh from the GA-midtrain base — exactly like internal.
-keys_to_skip_loading = ["net_ema.", "action2llm", "llm2action", "action_modality_embed", "action_pos_embed"]
+save_iter = 1000
+
+# Per-rank batch is 128 in the experiment (res480; matches the reference recipe).
+# 128 OOMs on a 139 GiB H200 — override at launch for H200:
+#   --opts dataloader_train.max_samples_per_batch=32

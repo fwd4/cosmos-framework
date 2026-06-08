@@ -9,12 +9,13 @@ un-normalized — same as the internal ``droid_lerobot_8b_policy`` run) through
 ``ActionTransformPipeline``, and trains the generation + action heads from the
 public ``nvidia/Cosmos3-Nano`` base.
 
-Usage (1 node)::
+Usage (1 node, 8 GPU)::
 
     DROID_ROOT=/path/to/droid_lerobot_640x360/success \\
     BASE_CHECKPOINT_PATH=<Cosmos3-Nano DCP dir> \\
-    torchrun --nproc_per_node=1 -m cosmos_framework.scripts.train \\
-        --sft-toml examples/toml/sft_config/action_policy_droid_nano.toml
+    WAN_VAE_PATH=<Wan2.2_VAE.pth> \\
+    torchrun --nproc_per_node=8 -m cosmos_framework.scripts.train \\
+        --sft-toml examples/toml/sft_config/action_policy_droid_repro.toml
 """
 
 import copy
@@ -40,8 +41,10 @@ action_policy_droid_nano = LazyDict(
             {"override /model": "mot_fsdp"},
             {"override /data_train": None},
             {"override /data_val": None},
+            # internal used fusedadamw (apex FusedAdam); adamw + fused=True is the
+            # torch-native, apex-free equivalent (kept for OSS portability).
             {"override /optimizer": "adamw"},
-            {"override /scheduler": "lambdacosine"},
+            {"override /scheduler": "lambdalinear"},  # matches internal droid_lerobot_8b (was lambdacosine)
             {"override /checkpoint": "s3"},
             {
                 "override /callbacks": [
@@ -81,7 +84,7 @@ action_policy_droid_nano = LazyDict(
                 "llm2action",
                 "action_modality_embed",
             ],
-            lr=1.0e-04,
+            lr=2.0e-04,  # matches internal droid_lerobot_8b_policy submit (--lr 2e-4)
             lr_multipliers={
                 "action2llm": 5.0,
                 "llm2action": 5.0,
@@ -120,7 +123,7 @@ action_policy_droid_nano = LazyDict(
                 device_monitor=dict(
                     every_n=200, log_memory_detail=True, save_s3=False, step_size=1, upload_every_n_mul=5
                 ),
-                grad_clip=dict(clip_norm=0.1, force_finite=True),
+                grad_clip=dict(clip_norm=1.0, force_finite=True),  # matches internal make_8b
                 heart_beat=dict(every_n=200, save_s3=False, step_size=1, update_interval_in_minute=20),
                 iter_speed=dict(every_n=1, hit_thres=50, save_s3=False, save_s3_every_log_n=500),
                 low_precision=dict(update_iter=1),
@@ -135,9 +138,17 @@ action_policy_droid_nano = LazyDict(
             dcp_async_mode_enabled=False,
             enable_gcs_patch_in_boto3=True,
             keys_not_to_resume=[],
-            # Load base weights; let EMA + action heads init fresh from the base
-            # (Cosmos3-Nano's action heads are not DROID-policy-trained).
-            keys_to_skip_loading=["net_ema."],
+            # Skip net_ema. (→ EMA warm-start copies net→net_ema, see dcp.py) AND the
+            # action heads, so they init fresh from the base — matches internal
+            # make_8b _DEFAULT_KEYS_TO_SKIP (Cosmos3-Nano's action heads are not
+            # DROID-policy-trained).
+            keys_to_skip_loading=[
+                "net_ema.",
+                "action2llm",
+                "llm2action",
+                "action_modality_embed",
+                "action_pos_embed",
+            ],
             load_ema_to_reg=False,
             load_path="???",  # Cosmos3-Nano DCP dir; supply via TOML/env
             load_training_state=False,

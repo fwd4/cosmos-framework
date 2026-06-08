@@ -540,12 +540,13 @@ class DistributedCheckpointer(AbstractCheckpointer):
                                 )
                                 _state_dict[sd_key] = _state_dict[key_ema]
                     elif warm_start and any(k.startswith("net_ema.") for k in _state_dict):
-                        # Warm-start init checkpoints (e.g. HF -> DCP converted via
-                        # convert_model_to_dcp) contain only net.* and no net_ema.*, so after
-                        # dcp.load() the net_ema.* entries are left at the model's
-                        # construction-time weights (the pretrained backbone), not the init.
-                        # Reset EMA = the freshly-loaded reg weights (copy net.* -> net_ema.*)
-                        # so the EMA starts from the warm-start init rather than the backbone.
+                        # Warm-start init checkpoints (e.g. HF -> DCP via convert_model_to_dcp)
+                        # contain only net.* and no net_ema.*. So after dcp.load() the net_ema.*
+                        # entries keep the model's construction-time values from build_net()
+                        # (default/random init — the pretrained backbone is NOT loaded at
+                        # construction when vlm_config.pretrained_weights.enabled=False), which
+                        # would seed EMA from random weights. Copy net.* -> net_ema.* so EMA
+                        # starts from the freshly-loaded warm-start init instead.
                         log.info("Warm start: resetting net_ema = net so EMA starts from the init weights.")
                         for sd_key in list(_state_dict.keys()):
                             if sd_key.startswith("net."):
