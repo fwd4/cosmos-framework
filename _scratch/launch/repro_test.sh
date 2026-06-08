@@ -1,4 +1,7 @@
 #!/bin/bash
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: OpenMDW-1.1
+
 # 1-node 8xH200 test: dryrun + 30-iter train at res480, max_samples_per_batch=64.
 source /tmp/cf/_scratch/launch/_common.sh
 export IMAGINAIRE_OUTPUT_ROOT=/fwd4/cosmos3_action_runs/repro_test

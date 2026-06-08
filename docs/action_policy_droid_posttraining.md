@@ -39,12 +39,12 @@ code becomes public).
 
 ## Hardware
 
-| | |
-|---|---|
-| Validated on | 64 × GB200 NVL72 nodes, 4 GPU/node = **256 GPUs** |
-| Throughput | ~**9.2 s/iter** at global batch 8192 (256 ranks × 32 samples) |
-| Parallelism | HSDP, `data_parallel_shard_degree=8` × replicate=32 |
-| Smoke | runnable on far fewer GPUs for config/import/data sanity (see below) |
+|              |                                                                      |
+| ------------ | -------------------------------------------------------------------- |
+| Validated on | 64 × GB200 NVL72 nodes, 4 GPU/node = **256 GPUs**                    |
+| Throughput   | ~**9.2 s/iter** at global batch 8192 (256 ranks × 32 samples)        |
+| Parallelism  | HSDP, `data_parallel_shard_degree=8` × replicate=32                  |
+| Smoke        | runnable on far fewer GPUs for config/import/data sanity (see below) |
 
 10k iters ≈ **~25 h**; the full **100k**-iter target is a multi-day run that must resume across
 `batch_long` (168 h) windows from its checkpoints.
@@ -68,18 +68,18 @@ port — prerequisite #3). Document filtering as a preprocessed input until the 
 
 ## Recipe (canonical knobs — preserve these)
 
-| knob | value |
-|---|---|
-| init | 8B **midtrain** checkpoint |
-| action space | `joint_pos` (absolute joint position, 8-D incl. gripper) |
-| state | `use_state=true` (proprioception; valid only with `joint_pos`) |
-| resolution | `480` |
-| viewpoint / video | `concat_view` / `video_mode=null` |
-| chunk length | `32` (tokenizer `encode_exact_durations=[33]`) |
-| image augmentation | enabled |
-| lr | `2e-4` |
-| samples/rank | `32` → global batch `8192` at 256 ranks |
-| eval | disabled for the reproduction run |
+| knob               | value                                                          |
+| ------------------ | -------------------------------------------------------------- |
+| init               | 8B **midtrain** checkpoint                                     |
+| action space       | `joint_pos` (absolute joint position, 8-D incl. gripper)       |
+| state              | `use_state=true` (proprioception; valid only with `joint_pos`) |
+| resolution         | `480`                                                          |
+| viewpoint / video  | `concat_view` / `video_mode=null`                              |
+| chunk length       | `32` (tokenizer `encode_exact_durations=[33]`)                 |
+| image augmentation | enabled                                                        |
+| lr                 | `2e-4`                                                         |
+| samples/rank       | `32` → global batch `8192` at 256 ranks                        |
+| eval               | disabled for the reproduction run                              |
 
 ## Full reproduction (OSS command shape — pending prerequisites)
 

@@ -1,4 +1,7 @@
 #!/bin/bash
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: OpenMDW-1.1
+
 # ============================================================================
 # Self-contained 2-node / 16-rank DROID action-SFT test (HSDP shard 8 x repl 2).
 # Launch cmd only clones + runs this:

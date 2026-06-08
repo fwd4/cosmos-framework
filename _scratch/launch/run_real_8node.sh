@@ -1,4 +1,7 @@
 #!/bin/bash
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: OpenMDW-1.1
+
 # ============================================================================
 # REAL RUN: 8-node / 64-rank DROID action-SFT (HSDP shard 8 x replicate=nnodes).
 # global batch = 32/rank x 64 ranks = 2048. res480, max_iter=10000, ckpt/1000.

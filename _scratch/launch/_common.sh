@@ -1,4 +1,7 @@
 #!/bin/bash
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: OpenMDW-1.1
+
 # Shared setup for cdg Lepton launch scripts. Sourced after the repo is cloned
 # to /tmp/cf by the bootstrap command. NOT part of the OSS recipe (scratch only).
 set +e

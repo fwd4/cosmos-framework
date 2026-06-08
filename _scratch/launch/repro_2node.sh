@@ -1,4 +1,7 @@
 #!/bin/bash
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: OpenMDW-1.1
+
 # 2-node / 16-rank test: HSDP shard 8 x replicate 2, res480, max_samples_per_batch=64,
 # 30-iter train. Rendezvous via Lepton multi-worker env (confirmed via mw-probe3).
 source /tmp/cf/_scratch/launch/_common.sh

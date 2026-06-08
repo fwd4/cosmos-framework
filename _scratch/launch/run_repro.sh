@@ -1,4 +1,7 @@
 #!/bin/bash
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: OpenMDW-1.1
+
 # ============================================================================
 # Expanded, self-contained 1-node 8xH200 DROID action-SFT test.
 # The Lepton --command only clones the repo then runs this script:
