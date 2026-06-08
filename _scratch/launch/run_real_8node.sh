@@ -54,7 +54,21 @@ OPTS="dataloader_train.max_samples_per_batch=32 checkpoint.save_iter=1000"
 echo "########## [3/4] rendezvous ##########"
 MASTER="${LEPTON_JOB_NAME}-0.${LEPTON_SUBDOMAIN}.ws-${LEPTON_WORKSPACE_ID}.svc.cluster.local"
 echo "RDZV nnodes=$NNODES node_rank=$NRANK master=$MASTER"
-getent hosts "$MASTER" && echo "MASTER_DNS_OK" || echo "MASTER_DNS_FAIL"
+# Pods start at very different times (preemption + per-node uv sync), so the
+# master's DNS record and rendezvous port (29500) appear late. Non-master ranks
+# wait for BOTH before launching torchrun — avoids the gai-error race and a
+# torchrun store-connect timeout. Master (rank 0) skips the wait and binds 29500.
+if [ "${NRANK}" != "0" ]; then
+  echo "worker ${NRANK}: waiting for master DNS + port 29500 ..."
+  for i in $(seq 1 360); do
+    if getent hosts "$MASTER" >/dev/null 2>&1 && (exec 3<>/dev/tcp/"$MASTER"/29500) 2>/dev/null; then
+      exec 3>&- 3<&-; echo "MASTER_REACHABLE after $((i*5))s"; break
+    fi
+    sleep 5
+  done
+else
+  getent hosts "$MASTER" >/dev/null 2>&1 && echo "MASTER_DNS_OK (self)" || echo "MASTER_DNS_PENDING (self)"
+fi
 LOGD=/fwd4/cosmos3_action_runs/real_log_${NRANK}; mkdir -p "$LOGD"
 
 echo "########## [4/4] REAL TRAIN max_iter=10000, global batch 2048 ##########"
