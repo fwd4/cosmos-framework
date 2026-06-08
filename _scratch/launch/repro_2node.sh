@@ -14,7 +14,7 @@ sed -i 's/data_parallel_replicate_degree = 1/data_parallel_replicate_degree = 2/
 LOGD=/fwd4/cosmos3_action_runs/repro_2node_log_${NRANK}; rm -rf "$LOGD"; mkdir -p "$LOGD"
 
 echo "===== 2-NODE TRAIN 30 iters (16 ranks) ====="
-torchrun --nnodes="$NNODES" --node_rank="$NRANK" --nproc_per_node=8 \
+"$TORCHRUN" --nnodes="$NNODES" --node_rank="$NRANK" --nproc_per_node=8 \
   --master_addr="$MASTER" --master_port=29500 \
   --tee 3 --redirects 3 --log-dir "$LOGD" \
   -m cosmos_framework.scripts.train --sft-toml="$TOML" -- $OPTS trainer.max_iter=30

@@ -10,9 +10,19 @@ for att in 1 2 3 4 5; do
   echo "uv sync attempt $att"
   uv sync --all-extras --group=cu130-train >/tmp/sync.log 2>&1 && { echo UV_SYNC_OK; break; } || { echo "sync $att failed:"; tail -6 /tmp/sync.log; sleep 10; }
 done
-[ -f .venv/bin/activate ] && echo "VENV_OK" || echo "VENV_MISSING"
-source .venv/bin/activate && export LD_LIBRARY_PATH=
-python -c "import torch;print('TORCH',torch.__version__,'devs',torch.cuda.device_count())" 2>&1 | tail -1
+VENV=/tmp/cf/.venv
+[ -f "$VENV/bin/activate" ] && echo "VENV_OK" || echo "VENV_MISSING"
+source "$VENV/bin/activate" && export LD_LIBRARY_PATH=
+# Force the venv interpreter/torchrun so we never silently fall back to the
+# base image's system Python (which lacks project deps like loguru).
+export TORCHRUN="$VENV/bin/torchrun"
+if [ ! -x "$VENV/bin/python" ] || [ ! -x "$TORCHRUN" ]; then
+  echo "FATAL_VENV_INCOMPLETE: missing $VENV/bin/python or torchrun — uv sync did not finish."
+  echo "----- sync.log tail -----"; tail -40 /tmp/sync.log; echo "----- end sync.log -----"
+  echo "ALL_DONE"; exit 1
+fi
+"$VENV/bin/python" -c "import torch,loguru;print('IMPORTS_OK torch',torch.__version__,torch.__file__,'devs',torch.cuda.device_count())" 2>&1 | tail -3 \
+  || { echo "FATAL_IMPORT_FAIL (loguru/torch not importable in venv)"; tail -40 /tmp/sync.log; echo "ALL_DONE"; exit 1; }
 export HF_HOME=/fwd4/.cache/huggingface
 VAE=$(find /fwd4/.cache/huggingface /fwd4/cosmos3_action_runs -name Wan2.2_VAE.pth 2>/dev/null | head -1)
 export WAN_VAE_PATH="$VAE"
