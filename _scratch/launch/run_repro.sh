@@ -45,8 +45,13 @@ export DROID_ROOT=/fwd4/droid_plus_lerobot_640x360_20260412/success
 export BASE_CHECKPOINT_PATH=/fwd4/cosmos3_action_runs/cosmos3_nano_dcp
 echo "DROID_ROOT=$( [ -d "$DROID_ROOT" ] && echo yes || echo NO ) BASE_CKPT=$( [ -d "$BASE_CHECKPOINT_PATH" ] && echo yes || echo NO )"
 export IMAGINAIRE_OUTPUT_ROOT=/fwd4/cosmos3_action_runs/repro_test
+# Reduce CUDA fragmentation (the OOM at batch 64 left ~5 GiB reserved-unallocated).
+export PYTORCH_ALLOC_CONF=expandable_segments:True
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 TOML=examples/toml/sft_config/action_policy_droid_repro.toml
-OPTS="dataloader_train.max_samples_per_batch=64 job.wandb_mode=disabled"
+# batch 64 @ res480 OOMs on 139GiB H200 (internal used 128 on GB200). 32 per rank fits.
+BATCH="${MAX_SAMPLES:-32}"
+OPTS="dataloader_train.max_samples_per_batch=${BATCH} job.wandb_mode=disabled"
 LOGD=/fwd4/cosmos3_action_runs/repro_test_log; rm -rf "$LOGD"; mkdir -p "$LOGD"
 
 echo "########## [3/4] DRYRUN (res480, batch64) ##########"
