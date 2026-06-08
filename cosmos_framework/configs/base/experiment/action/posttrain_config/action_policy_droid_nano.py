@@ -84,7 +84,7 @@ action_policy_droid_nano = LazyDict(
                 "llm2action",
                 "action_modality_embed",
             ],
-            lr=2.0e-04,  # matches internal droid_lerobot_8b_policy submit (--lr 2e-4)
+            lr=1.0e-04,  # sqrt-scaled for 2048 global batch (internal 2e-4 was for 8192 = 4x)
             lr_multipliers={
                 "action2llm": 5.0,
                 "llm2action": 5.0,
