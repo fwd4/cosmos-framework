@@ -70,12 +70,10 @@ logging_iter = 50
 [trainer.callbacks.grad_clip]
 clip_norm = 1.0          # internal value (smoke used 0.1)
 
-[dataloader_train]
-# Count-based batch (matches internal res480 8B: max_samples_per_batch=128).
-# max_sequence_length=null disables token packing so the count is exact.
-# Drop to 64 if 128 OOMs on 8xH200 (internal ran on GB200).
-max_samples_per_batch = 128
-max_sequence_length   = null
+# NOTE: count-based batch (max_samples_per_batch=128, max_sequence_length=None)
+# is set in the experiment Python recipe — TOML cannot express `null`, and the
+# loader only overrides keys present here. Override the count at launch with
+# `--opts dataloader_train.max_samples_per_batch=64` if 128 OOMs on 8xH200.
 
 [checkpoint]
 load_path = "${oc.env:BASE_CHECKPOINT_PATH}"
