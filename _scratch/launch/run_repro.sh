@@ -18,12 +18,14 @@ echo "curl=$(command -v curl) ffmpeg=$(command -v ffmpeg)"
 echo "########## [1/4] uv + venv (cu130-train) ##########"
 cd /tmp/cf || { echo "NO_REPO"; exit 1; }
 echo "REPO head=$(git rev-parse --short HEAD 2>/dev/null) pyproject=$([ -f pyproject.toml ] && echo yes || echo NO)"
-export PATH="$HOME/.local/bin:$PATH"
-command -v uv >/dev/null 2>&1 || { curl -LsSf https://astral.sh/uv/install.sh | sh >/tmp/uv.log 2>&1; source "$HOME/.local/bin/env" 2>/dev/null; }
-uv --version || echo "UV_MISSING"
-for att in 1 2 3 4 5; do
+# ALWAYS install latest uv (container's may be too old for required-version >=0.11.3).
+curl -LsSf https://astral.sh/uv/install.sh | sh >/tmp/uv.log 2>&1
+export PATH="$HOME/.local/bin:$PATH"; hash -r
+UV="$HOME/.local/bin/uv"; [ -x "$UV" ] || UV=uv
+echo "uv=$($UV --version 2>&1)"
+for att in 1 2 3 4 5 6 7 8; do
   echo "uv sync attempt $att"
-  uv sync --all-extras --group=cu130-train >/tmp/sync.log 2>&1 && { echo "UV_SYNC_OK"; break; } || { echo "sync $att failed:"; tail -8 /tmp/sync.log; sleep 10; }
+  "$UV" sync --all-extras --group=cu130-train >/tmp/sync.log 2>&1 && { echo "UV_SYNC_OK"; break; } || { echo "sync $att failed:"; tail -8 /tmp/sync.log; sleep 15; }
 done
 VENV=/tmp/cf/.venv
 [ -f "$VENV/bin/activate" ] && echo "VENV_OK" || echo "VENV_MISSING"
