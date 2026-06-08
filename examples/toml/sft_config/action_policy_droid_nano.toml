@@ -15,7 +15,7 @@
 # overrides scalars for the smoke.
 #
 # Env required:
-#   DROID_ROOT=/fwd4/droid_plus_lerobot_640x360_20260412/success
+#   DROID_ROOT=/path/to/droid_lerobot_640x360/success
 #   BASE_CHECKPOINT_PATH=<Cosmos3-Nano DCP dir>
 # ============================================================================
 

@@ -11,7 +11,7 @@ public ``nvidia/Cosmos3-Nano`` base.
 
 Usage (1 node)::
 
-    DROID_ROOT=/fwd4/droid_plus_lerobot_640x360_20260412/success \\
+    DROID_ROOT=/path/to/droid_lerobot_640x360/success \\
     BASE_CHECKPOINT_PATH=<Cosmos3-Nano DCP dir> \\
     torchrun --nproc_per_node=1 -m cosmos_framework.scripts.train \\
         --sft-toml examples/toml/sft_config/action_policy_droid_nano.toml

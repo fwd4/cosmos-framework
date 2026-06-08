@@ -17,10 +17,10 @@
 # ([17]), dataset resolution. See the launch command in the recipe docstring.
 #
 # Env required:
-#   DROID_ROOT=/fwd4/droid_plus_lerobot_640x360_20260412/success
+#   DROID_ROOT=/path/to/droid_lerobot_640x360/success
 #   BASE_CHECKPOINT_PATH=<Cosmos3-Nano DCP dir>
 #   WAN_VAE_PATH=<Wan2.2_VAE.pth>
-#   IMAGINAIRE_OUTPUT_ROOT=/fwd4/cosmos3_action_runs   # persist ckpts on NFS
+#   IMAGINAIRE_OUTPUT_ROOT=/path/to/output_root   # persist ckpts on NFS
 # ============================================================================
 
 [job]
