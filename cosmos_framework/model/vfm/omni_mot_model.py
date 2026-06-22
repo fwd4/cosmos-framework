@@ -106,6 +106,16 @@ class OmniMoTModel(ImaginaireModel):
         self.input_image_key = self.config.input_image_key
         self.input_caption_key = self.config.input_caption_key
 
+        # Optional GPU-side per-sample photometric augmentation (see config.train_color_jitter).
+        # Built once; applied in _normalize_video_databatch_inplace during training only.
+        _cj_cfg = getattr(self.config, "train_color_jitter", None)
+        if _cj_cfg:
+            import torchvision.transforms as _tv_transforms
+
+            self._train_color_jitter = _tv_transforms.ColorJitter(**_cj_cfg)
+        else:
+            self._train_color_jitter = None
+
     @misc.timer("OmniMoTModel: set_up_tokenizers")
     def set_up_tokenizers(self) -> None:
         """
@@ -2979,7 +2989,18 @@ class OmniMoTModel(ImaginaireModel):
                     if isinstance(item, torch.Tensor):
                         item = [item]
                     assert item[0].dtype == torch.uint8, "Video data is not in uint8 format."
-                    data_batch[input_key][i] = torch.stack(item).to(**self.tensor_kwargs) / 127.5 - 1.0
+                    v = torch.stack(item).to(**self.tensor_kwargs) / 255.0  # [B,C,T,H,W] in [0,1]
+                    # GPU-side per-sample ColorJitter during training (moved off the CPU
+                    # dataloader workers). torchvision ColorJitter expects channels at dim -3,
+                    # so fold (B,T) into the batch -> [(B T),C,H,W]; one sampled param set per
+                    # call applies uniformly across all frames -> temporally consistent, matching
+                    # the dataset's per-__getitem__ jitter. Video layout is [B,C,T,H,W].
+                    if self.training and self._train_color_jitter is not None:
+                        _b = v.shape[0]
+                        v = rearrange(v, "b c t h w -> (b t) c h w")
+                        v = self._train_color_jitter(v)
+                        v = rearrange(v, "(b t) c h w -> b c t h w", b=_b)
+                    data_batch[input_key][i] = v * 2.0 - 1.0  # -> [-1, 1]
                 data_batch[IS_PREPROCESSED_KEY] = True
 
     def _normalize_action_databatch(
