@@ -1296,6 +1296,12 @@ def main() -> None:
             f"Task {task_id} summary: {task_successes}/{task_episodes} ({task_success_rate * 100:.1f}%)",
             flush=True,
         )
+        # Close the env (and its EGL/MuJoCo render context) before the next task.
+        # Leaving it open leaks one EGL context per task and hangs after ~8 tasks.
+        try:
+            env.close()
+        except Exception:
+            pass
 
     overall_success_rate = float(total_successes) / float(total_episodes) if total_episodes > 0 else 0.0
     summary = {
