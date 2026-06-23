@@ -87,33 +87,61 @@ lower-memory GPUs reduce the per-rank batch:
 
 ## 3. Closed-loop eval
 
-Start the policy server on the trained checkpoint, then run the LIBERO
-simulator client against it.
+Start the policy server on a **trained** checkpoint, then run the LIBERO
+simulator client against it. (The base `nvidia/Cosmos3-Nano` DCP has no action
+heads — use a checkpoint from §2.)
 
 ```bash
-# Server (loads the checkpoint, denormalizes actions). Use quantile_rot + the
-# bundled libero rot6d stats so denormalization matches training. See
-# `python -m cosmos_framework.scripts.action_policy_server_libero --help`.
+# Server (training venv). Loads the DCP (single-rank no_dist), denormalizes with
+# quantile_rot + the bundled libero rot6d stats. The experiment supplies the VAE
+# path via the override (the server loads the experiment directly, no TOML).
 python -m cosmos_framework.scripts.action_policy_server_libero \
-  --port 8000 \
+  --experiment action_policy_libero_nano \
+  --experiment-overrides "model.config.tokenizer.vae_path=$WAN_VAE_PATH" \
+  --checkpoint-path <trained DCP dir, e.g. $OUTPUT_ROOT/.../checkpoints/iter_000002000> \
   --action-normalization quantile_rot \
   --action-stats-path cosmos_framework/data/vfm/action/datasets/stats/libero_native_frame_wise_relative_rot6d.json \
-  --raw-action-dim 10 \
-  <checkpoint / experiment flags>
-
-# Client (LIBERO sim; runs in a LIBERO + robosuite + mujoco env, separate from
-# the training install). Match the training view (concat agentview + wrist):
-PYTHONPATH=. python cosmos_framework/simulation/libero/closed_loop_eval.py \
-  --server_url http://localhost:8000 \
-  --task_suite libero_10 \
-  --num_trials_per_task 10 \
-  --action_horizon 16 \
-  --camera agentview,wrist \
-  --image_size 256 \
-  --action_space frame_wise_relative --rotation_space 6d --action_dim 10 \
-  --save_gifs --gif_fps 20 \
-  --output_dir results/libero_closed_loop_10
+  --raw-action-dim 10 --fps 20 --port 8000
 ```
+
+**Eval environment** (the LIBERO sim needs a *separate* venv — robosuite/mujoco
+versions conflict with the training env, and the NGC image needs graphics
+enabled). This combo is validated headless on an NVIDIA GPU:
+
+```bash
+# 1. Enable the NVIDIA graphics libs in the container (mounts host libEGL_nvidia
+#    etc.); do NOT apt-install libnvidia-gl (it mismatches the mounted driver).
+export NVIDIA_DRIVER_CAPABILITIES=all
+apt-get install -y libegl1 libglvnd0 libgl1 libglib2.0-0 ffmpeg
+mkdir -p /usr/share/glvnd/egl_vendor.d   # ICD (usually already mounted)
+echo '{"file_format_version":"1.0.0","ICD":{"library_path":"libEGL_nvidia.so.0"}}' \
+  > /usr/share/glvnd/egl_vendor.d/10_nvidia.json
+
+# 2. Separate py3.10 venv with LIBERO-compatible sim pins + torch<2.6
+#    (torch>=2.6 defaults weights_only=True and breaks LIBERO init-state loads).
+uv venv --python 3.10 .libenv && VV=.libenv/bin/python
+git clone https://github.com/Lifelong-Robot-Learning/LIBERO.git && \
+  uv pip install -p $VV -e LIBERO -r LIBERO/requirements.txt
+uv pip install -p $VV "robosuite==1.4.1" "mujoco==2.3.7" "torch<2.6" loguru requests scipy pillow numpy
+
+# 3. LIBERO first-run config (avoids the interactive prompt) + robosuite macros
+mkdir -p ~/.libero && touch ~/.libero/config.yaml
+RS=$($VV -c "import robosuite,os;print(os.path.dirname(robosuite.__file__))")
+$VV "$RS/scripts/setup_macros.py"
+$VV -c "from libero.libero import set_libero_default_path; set_libero_default_path()"
+
+# 4. Run the client (concat agentview+wrist matches the 256x512 training view).
+MUJOCO_GL=egl PYTHONPATH=$PWD:$PWD/LIBERO $VV \
+  cosmos_framework/simulation/libero/closed_loop_eval.py \
+  --server_url http://localhost:8000 \
+  --task_suite libero_10 --num_trials_per_task 10 --action_horizon 16 \
+  --camera agentview,wrist --image_size 256 \
+  --action_space frame_wise_relative --rotation_space 6d --action_dim 10 \
+  --save_gifs --gif_fps 20 --output_dir results/libero_closed_loop_10
+```
+
+Validated end-to-end against a stub server (episode runs, `summary.json` + GIFs
+written, `rc=0`); a benign `EGLError` may print during context teardown on exit.
 
 ## 4. Gotchas (from NVIDIA/cosmos-framework#50)
 
