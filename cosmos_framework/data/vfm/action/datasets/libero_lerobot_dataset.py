@@ -113,6 +113,16 @@ class LIBEROLeRobotDataset(ActionBaseDataset):
             action_normalization=None if action_normalization is None else "quantile",
             sample_stride=sample_stride,
         )
+        # FPS-agnostic loader: trust the dataset's NATIVE fps for conditioning_fps /
+        # prompt duration so the metadata is truthful (10 for the public
+        # lerobot/libero_*, 20 for a 20 FPS conversion). Frame sampling uses each
+        # frame's real timestamp regardless, so the requested ``fps`` is ignored here.
+        info_fps = self._info.get("fps")
+        if info_fps:
+            if int(info_fps) != int(fps):
+                log.info(f"Using dataset native fps={info_fps} for conditioning (requested {fps}).")
+            self._fps = float(info_fps)
+            self._dt = 1.0 / self._fps
         self._camera_mode = camera_mode
         self._image_size = int(image_size)
         self._rotation_space = rotation_space.lower().strip()
