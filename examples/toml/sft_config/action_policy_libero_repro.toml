@@ -31,8 +31,9 @@ wandb_mode   = "online"
 
 [model]
 precision = "bfloat16"
-# GA: uncap-ish packed sequence so full 256x512 concat_view windows are not truncated.
-max_num_tokens_after_packing = 74000
+# -1 = uncapped packing. LIBERO is low-res (192x320 model canvas), so each rank packs
+# the full max_samples_per_batch without a token cap throttling it (H200 has headroom).
+max_num_tokens_after_packing = -1
 
 [model.parallelism]
 data_parallel_shard_degree     = 8    # 8-GPU model shard; set replicate for multi-node HSDP
@@ -55,19 +56,20 @@ warm_up_steps = [2000]    # GA recipe
 [trainer]
 max_iter        = 10000
 logging_iter    = 50
-grad_accum_iter = 2       # GA recipe (global batch = 128 x 8 ranks x 2)
+grad_accum_iter = 1       # global batch = max_samples_per_batch 256 x DP 8 x 1 = 2048
+                          # (single 256-sample fwd > two 128 micro-batches: better MFU at low-res)
 
 [checkpoint]
 load_path = "${oc.env:BASE_CHECKPOINT_PATH}"
 save_iter = 1000          # ckpt 2000 is the Table-20 reference; keep <=2000 cadence
 
-# NOTE (train/serve parity — see GitHub issue NVIDIA/cosmos-framework#50): training
-# here builds 256x512 concat_view inputs (image_size=256 x 2 cameras) at 20 FPS. The
-# closed-loop eval server MUST present the SAME resolution and the SAME prompt suffix
-# ("...is of 256x512 resolution.", duration from chunk_length/fps) — a 192x320 / "0.0s"
-# train-vs-256x512 / "0.8s" serve mismatch was the reported cause of a ~62% (vs ~97%)
-# eval. Use --action-normalization quantile_rot + the bundled libero rot6d stats on the
-# server so denormalization matches training.
+# NOTE (train/serve parity — see GitHub issue NVIDIA/cosmos-framework#50): the
+# 256x512 concat_view is snapped to a 192x320 model canvas (resize+reflect-pad), and
+# the eval server reproduces the same snap. Run the client with the same 2:1 concat
+# (--camera agentview,wrist --image_size 256) so resolution + prompt suffix match, and
+# use --action-normalization quantile_rot + the bundled libero rot6d stats on the
+# server so denormalization matches training. See docs/action_policy_libero_sft.md.
 #
-# max_samples_per_batch is 128 in the experiment. On lower-memory GPUs reduce at launch:
-#   --opts dataloader_train.max_samples_per_batch=32
+# max_samples_per_batch is 256 in the experiment (H200, ~60% util at 128 left headroom).
+# On lower-memory GPUs reduce at launch:
+#   --opts dataloader_train.max_samples_per_batch=64
