@@ -209,10 +209,19 @@ def _load_model(
         keys_to_skip_loading=keys_to_skip_loading or [],
     )
 
+    # Single-rank load (e.g. the action policy inference server): force no_dist so
+    # ``dcp.load`` skips the collective ``gather_object`` over the load plan. That
+    # gather pickles the plan, which fails with "cannot pickle code objects" for
+    # training/EMA DCPs whose metadata carries non-tensor objects; a single process
+    # owns the full checkpoint anyway, so the collective is unnecessary. Multi-rank
+    # (sharded) loads keep the default distributed path.
+    no_dist = not (dist.is_available() and dist.is_initialized() and dist.get_world_size() > 1)
+
     dcp.load(
         state_dict=state_dict,
         storage_reader=storage_reader,
         planner=load_planner,
+        no_dist=no_dist,
     )
 
     log.info(f"Successfully loaded model from {checkpoint_path}")
