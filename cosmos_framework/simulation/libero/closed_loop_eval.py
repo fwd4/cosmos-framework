@@ -857,6 +857,45 @@ def _parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+class _LiberoEnvFactory:
+    """Picklable env factory for SubprocVectorEnv under the spawn start method.
+
+    spawn pickles each env_fn and re-imports this module in the child, so the
+    factory must be a top-level class (lambdas/closures are not picklable). The
+    child sets the GL backend and imports OffScreenRenderEnv locally so its EGL
+    context is created fresh in the worker process."""
+
+    def __init__(
+        self,
+        *,
+        bddl_file_name: str,
+        camera_heights: int,
+        camera_widths: int,
+        render_gpu_device_id: int,
+        mujoco_gl: str,
+    ) -> None:
+        self.bddl_file_name = bddl_file_name
+        self.camera_heights = camera_heights
+        self.camera_widths = camera_widths
+        self.render_gpu_device_id = render_gpu_device_id
+        self.mujoco_gl = mujoco_gl
+
+    def __call__(self) -> Any:
+        os.environ.setdefault("MUJOCO_GL", self.mujoco_gl)
+        if self.mujoco_gl == "egl":
+            os.environ.setdefault("PYOPENGL_PLATFORM", "egl")
+        elif self.mujoco_gl == "osmesa":
+            os.environ.setdefault("PYOPENGL_PLATFORM", "osmesa")
+        from libero.libero.envs import OffScreenRenderEnv as _OffScreenRenderEnv
+
+        return _OffScreenRenderEnv(
+            bddl_file_name=self.bddl_file_name,
+            camera_heights=self.camera_heights,
+            camera_widths=self.camera_widths,
+            render_gpu_device_id=self.render_gpu_device_id,
+        )
+
+
 def _run_task_vectorized(
     task: Any,
     task_description: str,
@@ -883,7 +922,19 @@ def _run_task_vectorized(
     (not-done) envs, issues ONE batched /predict_batch, and steps all active envs;
     done envs are masked out. Returns per-trial result dicts in trial order with the
     same shape as the serial path's episode_results."""
+    import multiprocessing as _mp
+
     from libero.libero.envs.venv import SubprocVectorEnv
+
+    # LIBERO's SubprocVectorEnv defaults to the fork start method; forked children
+    # inherit the parent's already-dlopen'd EGL/GL state, which corrupts per-child
+    # render-context creation (EGLError / 'EGLGLContext' has no attribute '_context').
+    # Force spawn so each env worker starts clean — exactly like the (working) serial
+    # single-process path. spawn pickles env_fns, so the factory below is picklable.
+    try:
+        _mp.set_start_method("spawn", force=True)
+    except RuntimeError:  # pragma: no cover - already set
+        pass
 
     resolved_rotation_space = _infer_rotation_space(action_dim, rotation_space)
     bddl = os.path.join(get_libero_path("bddl_files"), task.problem_folder, task.bddl_file)
@@ -904,15 +955,15 @@ def _run_task_vectorized(
 
     n = min(num_envs, len(runnable))
 
-    def make_env_fn(b: str) -> Callable[[], Any]:
-        return lambda: OffScreenRenderEnv(
-            bddl_file_name=b,
-            camera_heights=env_image_size,
-            camera_widths=env_image_size,
-            render_gpu_device_id=render_gpu_device_id,
-        )
-
-    venv = SubprocVectorEnv([make_env_fn(bddl) for _ in range(n)])
+    mujoco_gl = os.environ.get("MUJOCO_GL", "egl")
+    env_fn = _LiberoEnvFactory(
+        bddl_file_name=bddl,
+        camera_heights=env_image_size,
+        camera_widths=env_image_size,
+        render_gpu_device_id=render_gpu_device_id,
+        mujoco_gl=mujoco_gl,
+    )
+    venv = SubprocVectorEnv([env_fn for _ in range(n)])
     try:
         venv.seed(seed)
         for w0 in range(0, len(runnable), n):
