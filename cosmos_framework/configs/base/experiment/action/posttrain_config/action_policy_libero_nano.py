@@ -211,13 +211,11 @@ action_policy_libero_nano = LazyDict(
                     libero=dict(
                         ratio=1,
                         dataset=L(get_action_libero_sft_dataset)(
-                            # Point at the libero_10 LeRobot conversion ONLY for the
-                            # Table-20 reproduction (4-suite mix -> ~82%, see module docstring).
-                            repo_id="${oc.env:LIBERO_REPO_ID,lerobot/libero_10}",
-                            # Empty LIBERO_ROOT -> download repo_id (lerobot/libero_10)
-                            # from the HF Hub; set it to a local LeRobot dir to train from disk.
-                            root="${oc.env:LIBERO_ROOT,}",
-                            fps=20,  # LIBERO native fps; required for frame_wise_relative policy deltas
+                            # Local LeRobot dir for the libero_10 conversion ONLY (Table-20
+                            # reproduction; 4-suite mix -> ~82%, see module docstring). Pre-sync:
+                            #   hf download lerobot/libero_10 --repo-type dataset --local-dir $LIBERO_ROOT
+                            root="${oc.env:LIBERO_ROOT}",
+                            fps=20,  # metadata only (FPS-agnostic loader); sets conditioning_fps / prompt duration
                             chunk_length=16,
                             image_size=256,  # concat_view -> 256x512
                             mode="policy",

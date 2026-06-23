@@ -19,24 +19,33 @@ Pieces:
 
 ## 1. Data
 
-Use a LeRobot conversion of LIBERO. The default `repo_id` is
-[`lerobot/libero_10`](https://huggingface.co/datasets/lerobot/libero_10): leave
-`LIBERO_ROOT` unset to download it from the HF Hub, or point `LIBERO_ROOT` at a
-local LeRobot dir to train from disk. **On a cluster, pre-sync once to shared
-storage** (`huggingface-cli download lerobot/libero_10 --repo-type dataset
---local-dir <nfs>/libero_10`) and set `LIBERO_ROOT=<nfs>/libero_10` — this avoids
-8 ranks racing to download into the HF cache.
+`LIBEROLeRobotDataset` reads a **local** LeRobot dir directly (parquet + video,
+like `DROIDLeRobotDataset`) — set `LIBERO_ROOT` to it. Pre-sync the HF dataset
+once to shared storage:
+
+```bash
+hf download lerobot/libero_10 --repo-type dataset --local-dir <nfs>/libero_10
+export LIBERO_ROOT=<nfs>/libero_10
+```
 
 **For the Table-20 number, use `libero_10` ALONE.** Training on the full 4-suite
 mix (libero_10 / object / spatial / goal) gives libero_10 only ~1 pass in 2000
-steps (~82%); libero_10 alone is ~2.7 passes (~97%).
+steps (~82%); libero_10 alone is ~2.7 passes (~97%). For more suites, add more
+`datasets=dict(...)` entries to the experiment's dataloader.
 
-`LIBEROLeRobotDataset` reads native LIBERO conventions: 20 FPS,
-`frame_wise_relative` rot6d actions (10D = `pos(3) + rot6d(6) + gripper(1)`),
-`concat_view` (third-person + wrist, each resized to 256×256, concatenated
-horizontally → 256×512), normalized with `quantile_rot` against the bundled
-stats. To train on more suites, pass `repo_id` / `root` as lists to
-`get_action_libero_sft_dataset`.
+It uses `frame_wise_relative` rot6d actions (10D = `pos(3) + rot6d(6) +
+gripper(1)`), `concat_view` (third-person + wrist, each resized to 256×256,
+concatenated horizontally → 256×512), normalized with `quantile_rot` against the
+bundled stats.
+
+**FPS-agnostic.** The loader windows by frame index and decodes video at each
+frame's real timestamp, so it works with any LeRobot LIBERO dataset regardless of
+FPS (no `delta_timestamps` grid). `fps` is metadata only (`conditioning_fps` +
+prompt duration). **Fidelity caveat:** the public `lerobot/libero_*` datasets are
+**10 FPS**, but the bundled `quantile_rot` stats were computed on NVIDIA's **20
+FPS** conversion; per-frame deltas at 10 FPS span 2× the wall-clock motion, so for
+a faithful Table-20 reproduction use a 20 FPS LIBERO dataset (or recompute stats
+for the dataset's FPS). See [§5](#5-fps--stats).
 
 **Model-input resolution = 192×320.** The 256×512 concat is aspect-2.0, so with
 `resolution=None` the `ActionTransformPipeline` snaps it to the closest `"256"`
@@ -131,3 +140,23 @@ first two, but verify them against your checkpoint:
 - **Normalization.** Always start the server with `--action-normalization
   quantile_rot` and the bundled libero rot6d stats file, or actions come out at
   the wrong scale.
+
+## 5. FPS & stats
+
+`LIBEROLeRobotDataset` follows `DROIDLeRobotDataset`: it reads the LeRobot parquet
+directly, windows by **frame index**, and decodes video at each frame's **real
+timestamp** — so it never builds LeRobot's `delta_timestamps` grid and works at
+any native FPS. (The earlier `delta_timestamps` port failed on the 10 FPS public
+dataset because a 1/20 s grid doesn't land on 10 FPS frames.)
+
+- **Public `lerobot/libero_*` = 10 FPS.** NVIDIA's internal conversion is 20 FPS,
+  which the bundled `quantile_rot` stats were computed on. There is no published
+  20 FPS LeRobot LIBERO dataset (the LIBERO sim is ~20 Hz, so one is producible
+  from the raw HDF5 via `huggingface/lerobot-libero`).
+- **What this means:** at 10 FPS each stored per-frame action delta covers 2× the
+  motion of a 20 FPS step, so the 20 FPS `quantile_rot` stats under-scale 10 FPS
+  actions. For a faithful Table-20 reproduction, either (a) use a 20 FPS LIBERO
+  conversion, or (b) recompute `quantile_rot` stats on the 10 FPS data and bundle
+  them via `action_stats_path`.
+- `fps` in the recipe only sets `conditioning_fps` and the prompt duration; it
+  does not change which frames are sampled.

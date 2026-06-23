@@ -146,9 +146,8 @@ def get_action_droid_sft_dataset(
 
 def get_action_libero_sft_dataset(
     *,
-    repo_id: str | list[str] = "lerobot/libero_10",
-    root: str | list[str] | None = None,
-    fps: int = 20,
+    root: str,
+    fps: float = 20.0,
     chunk_length: int = 16,
     image_size: int = 256,
     mode: str = "policy",
@@ -158,7 +157,6 @@ def get_action_libero_sft_dataset(
     pose_coordinate_frame: str = "native",
     action_normalization: str | None = "quantile_rot",
     action_stats_path: str | None = None,
-    download_videos: bool = True,
     split: str = "train",
     val_ratio: float = 0.01,
     seed: int = 0,
@@ -178,21 +176,16 @@ def get_action_libero_sft_dataset(
     Mirrors :func:`get_action_droid_sft_dataset` but feeds ``LIBEROLeRobotDataset``
     (frame-wise-relative rot6d actions, ``quantile_rot``-normalized, concat_view
     third-person + wrist at 256x256 each → 256x512) through
-    ``ActionTransformPipeline``. ``repo_id`` / ``root`` accept a single LIBERO
-    suite or a list of suites; for the Table-20 LIBERO-10 reproduction pass only
-    ``libero_10`` (training on the full 4-suite mix dilutes libero_10 to ~1 pass
-    in 2000 steps → ~82% vs ~97% on libero_10 alone).
+    ``ActionTransformPipeline``. ``root`` is a LOCAL LeRobot dir (read parquet +
+    video directly, like DROID); pre-sync the HF dataset once, e.g.
+    ``hf download lerobot/libero_10 --repo-type dataset --local-dir <root>``. For
+    the Table-20 LIBERO-10 reproduction point ``root`` at libero_10 alone (the
+    4-suite mix dilutes libero_10 to ~1 pass in 2000 steps → ~82% vs ~97%). The
+    dataset is FPS-agnostic (decodes at real frame timestamps); ``fps`` is metadata
+    for ``conditioning_fps`` / prompt duration.
     """
-    # An empty string from ``${oc.env:LIBERO_ROOT,}`` means "unset" -> HF download
-    # of ``repo_id`` (default lerobot/libero_10) into the HF cache. Point ``root``
-    # at a local LeRobot conversion to train from disk (recommended on a cluster:
-    # pre-sync once to shared storage to avoid per-rank download races).
-    if isinstance(root, str) and not root.strip():
-        root = None
     dataset = LIBEROLeRobotDataset(
-        repo_id=repo_id,
         root=root,
-        download_videos=download_videos,
         image_size=image_size,
         chunk_length=chunk_length,
         fps=fps,

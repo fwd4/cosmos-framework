@@ -26,15 +26,12 @@
 TOML_FILE="examples/toml/sft_config/action_policy_libero_repro.toml"
 : "${BASE_CHECKPOINT_PATH:=examples/checkpoints/Cosmos3-Nano}"
 
-# LIBEROLeRobotDataset reads ${oc.env:LIBERO_ROOT} / ${oc.env:LIBERO_REPO_ID} directly;
-# export them so torchrun (launched in this shell) inherits them.
-: "${LIBERO_REPO_ID:=lerobot/libero_10}"
-export LIBERO_REPO_ID
+# LIBEROLeRobotDataset reads ${oc.env:LIBERO_ROOT} directly (a LOCAL LeRobot dir);
+# export it so torchrun (launched in this shell) inherits it. Pre-sync once:
+#   hf download lerobot/libero_10 --repo-type dataset --local-dir "$LIBERO_ROOT"
 export LIBERO_ROOT="${LIBERO_ROOT:-}"
 
-# LIBERO_ROOT is optional: if set it must be a local LeRobot dir; if empty, the
-# dataset downloads $LIBERO_REPO_ID from the HF Hub.
-EXTRA_DATASET_CHECK='if [[ -n "$LIBERO_ROOT" ]]; then [[ -d "$LIBERO_ROOT" ]] || { echo "ERROR: LIBERO_ROOT is set but not a directory: '\''$LIBERO_ROOT'\''. Unset it to download $LIBERO_REPO_ID from HF, or point it at a local libero_10 LeRobot dir. See docs/action_policy_libero_sft.md" >&2; exit 1; }; else echo ">>> LIBERO_ROOT unset -> will use HF dataset $LIBERO_REPO_ID"; fi'
+EXTRA_DATASET_CHECK='[[ -f "$LIBERO_ROOT/meta/info.json" ]] || { echo "ERROR: LIBERO_ROOT must be a local LeRobot dir containing meta/info.json (got: '\''$LIBERO_ROOT'\''). Pre-sync: hf download lerobot/libero_10 --repo-type dataset --local-dir <dir>. See docs/action_policy_libero_sft.md" >&2; exit 1; }'
 
 # Extra Hydra overrides from the environment: a space-separated string word-split into
 # the TAIL_OVERRIDES array. An exported string survives `bash <wrapper>` (a child

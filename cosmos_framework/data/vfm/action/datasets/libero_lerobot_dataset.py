@@ -1,674 +1,309 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: OpenMDW-1.1
 
-"""LIBERO dataset for training from local storage, supporting multiple dataset roots."""
+"""LIBERO LeRobot dataset (frame-wise-relative action policy).
+
+Mirrors ``DROIDLeRobotDataset``: reads the LeRobot parquet directly, windows by
+frame index, and decodes video at each frame's REAL timestamp. That makes it
+FPS-agnostic — it works with the 10 FPS community ``lerobot/libero_*`` datasets
+and a 20 FPS conversion alike, without LeRobot's ``delta_timestamps`` grid (which
+rejects any window whose synthetic timestamps don't land on real frames).
+
+Action layout (``frame_wise_relative``): the stored 7D ``action`` is already a
+per-frame delta ``[dpos(3), drot_axisangle(3), gripper(1)]``; only the rotation is
+re-encoded to the requested ``rotation_space`` -> ``[dpos(3), rot6d(6), gripper(1)]``
+(10D for ``6d``).
+
+NOTE on FPS / stats fidelity: the bundled ``quantile_rot`` stats were computed on
+a 20 FPS conversion. Per-frame deltas at 10 FPS span 2x the wall-clock motion, so
+for a faithful Table-20 reproduction use a 20 FPS LIBERO dataset (or recompute
+stats for the dataset's FPS). Loading/training is correct at any FPS regardless.
+"""
+
+from __future__ import annotations
 
 import json
 import random
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
+import numpy as np
+import pyarrow.parquet as pq
 import torch
-import torchvision.transforms.functional as F
-from lerobot.datasets.lerobot_dataset import LeRobotDataset
-from torch.utils.data import Dataset
+import torch.nn.functional as F
+from lerobot.datasets.video_utils import decode_video_frames
 
 from cosmos_framework.utils import log
 from cosmos_framework.data.vfm.action.action_normalization import normalize_action
-from cosmos_framework.data.vfm.action.action_spec import (
-    Gripper,
-    Pos,
-    Rot,
-    build_action_spec,
-)
-from cosmos_framework.data.vfm.action.domain_utils import get_domain_id
-from cosmos_framework.data.vfm.action.libero_pose_utils import (
-    libero_action_dim,
-    libero_rotation_format,
-)
-from cosmos_framework.data.vfm.action.pose_utils import (
-    compute_idle_frames,
-    convert_rotation,
-)
+from cosmos_framework.data.vfm.action.action_spec import ActionSpec, Gripper, Pos, Rot, build_action_spec
+from cosmos_framework.data.vfm.action.datasets.base_dataset import ActionBaseDataset
+from cosmos_framework.data.vfm.action.libero_pose_utils import libero_action_dim, libero_rotation_format
+from cosmos_framework.data.vfm.action.pose_utils import convert_rotation
 
-LIBERO_ROOTS: list[str] = [
-    "<PATH_TO_LIBERO_10>",
-    "<PATH_TO_LIBERO_90>",
-    "<PATH_TO_LIBERO_OBJECT>",
-    "<PATH_TO_LIBERO_SPATIAL>",
-    "<PATH_TO_LIBERO_GOAL>",
-]
+CameraMode = Literal["image", "wrist_image", "concat_view"]
+RotationSpace = Literal["3d", "6d", "9d"]
+
+_ACTION_FEATURE = "action"
+_IMAGE_FEATURE = "observation.images.image"
+_WRIST_FEATURE = "observation.images.wrist_image"
+_STAT_KEYS = ("mean", "std", "min", "max", "q01", "q99")
+_NORMALIZERS_DIR = Path(__file__).parent / "stats"
+
+_VIEWPOINT_BY_CAMERA = {
+    "image": "third_person_view",
+    "wrist_image": "wrist_view",
+    "concat_view": "concat_view",
+}
 
 
-class LIBEROLeRobotDataset(Dataset):
+class LIBEROLeRobotDataset(ActionBaseDataset):
+    """LIBERO action-policy dataset with frame-wise-relative rot6d actions.
+
+    10D ``[pos_delta(3), rot6d_delta(6), gripper(1)]`` (for ``rotation_space='6d'``),
+    ``concat_view`` third-person + wrist video, and ``quantile_rot`` normalization
+    against the bundled stats. Reads parquet + decodes video at real timestamps,
+    so the requested ``fps`` is metadata only (it sets ``conditioning_fps`` and the
+    prompt duration); frame windows always use the data's actual frames.
     """
-    A Dataset wrapper for LeRobot LIBERO dataset(s) designed for training from local storage.
-
-    This dataset:
-    - Loads data from local storage using LeRobotDataset
-    - Supports multiple dataset roots that are concatenated into one dataset
-    - Supports configurable camera modes (image, wrist_image, or concat_view)
-    - Filters episodes for train/val split
-    - Filters frames at episode boundaries (to avoid padding issues with delta timestamps)
-    - Uses task descriptions from meta/tasks.parquet for ai_caption
-    """
-
-    _NORMALIZERS_DIR = Path(__file__).parent / "stats"
 
     def __init__(
         self,
-        repo_id: str | list[str] = "lerobot/libero_90",
-        root: str | list[str] | None = LIBERO_ROOTS,
-        image_size: int = 256,
-        chunk_length: int = 16,  # must be divisible by 4
-        fps: int = 10,  # IMPORTANT! LIBERO is at 20fps. If using frame_wise_relative in policy mode, we have to match the fps.
+        root: str,
+        fps: float = 20.0,
+        chunk_length: int = 16,
         mode: str = "policy",
-        video_backend: str | None = "torchcodec",
-        download_videos: bool = False,
-        force_cache_sync: bool = False,
         tolerance_s: float = 1e-4,
+        camera_mode: CameraMode = "concat_view",
+        image_size: int = 256,
+        action_space: str = "frame_wise_relative",
+        rotation_space: RotationSpace = "6d",
+        pose_coordinate_frame: str = "native",
+        embodiment_type: str = "libero",
+        action_normalization: str | None = "quantile_rot",
+        action_stats_path: str | None = None,
         split: str = "train",
         val_ratio: float = 0.01,
         seed: int = 0,
-        # Camera configuration
-        camera_mode: str = "image",  # 'image', 'wrist_image', or 'concat_view'
-        # Action configuration
-        action_space: str = "frame_wise_relative",  # "absolute" or "relative" or "frame_wise_relative"
-        # rotation_space
-        rotation_space: Literal["9d", "6d", "3d"] = "3d",
-        # Native simulator frame or shared OpenCV-style EE frame used by midtraining.
-        pose_coordinate_frame: Literal["native", "opencv"] = "native",
-        # domain-aware configuration
-        embodiment_type: str = "libero",
-        action_normalization: Literal["quantile", "quantile_rot", "meanstd", "minmax"] | None = None,
-        action_stats_path: str | None = None,
-        skip_video_loading: bool = False,
-    ):
-        super().__init__()
+        sample_stride: int = 1,
+    ) -> None:
+        if action_space != "frame_wise_relative":
+            raise NotImplementedError(
+                f"This LIBERO dataset only supports action_space='frame_wise_relative', got {action_space!r}."
+            )
+        if camera_mode not in _VIEWPOINT_BY_CAMERA:
+            raise ValueError(f"Unsupported camera_mode={camera_mode!r}. Use image/wrist_image/concat_view.")
+        split = split.lower().strip()
+        if split not in {"train", "val", "valid", "validation", "eval", "test", "full"}:
+            raise ValueError(f"Unsupported split={split!r}. Use train/val/full.")
+        if chunk_length % 4 != 0:
+            raise ValueError(f"chunk_length must be divisible by 4, got {chunk_length}.")
+
+        super().__init__(
+            root=root,
+            domain_name=embodiment_type,
+            fps=fps,
+            chunk_length=chunk_length,
+            mode=mode,
+            pose_convention="backward_framewise",  # unused for frame_wise deltas; satisfies the base assert
+            tolerance_s=tolerance_s,
+            viewpoint=_VIEWPOINT_BY_CAMERA[camera_mode],
+            # frame_wise_relative ⇔ backward_framewise idle semantics. quantile_rot is a
+            # LIBERO convention -> normalize with the "quantile" formula on raw-rotation
+            # stats (see _load_norm_stats); pass the method the base will call.
+            action_normalization=None if action_normalization is None else "quantile",
+            sample_stride=sample_stride,
+        )
+        self._camera_mode = camera_mode
+        self._image_size = int(image_size)
+        self._rotation_space = rotation_space.lower().strip()
+        self._pose_coordinate_frame = pose_coordinate_frame
         self._embodiment_type = embodiment_type
-        self.domain_id = get_domain_id(embodiment_type)
-        self.image_size = image_size
-        self.chunk_length = chunk_length
-        assert self.chunk_length % 4 == 0, "chunk_length must be divisible by 4"
-        self.fps = fps
-        self.mode = mode
-        self.split = split.lower().strip()
-        self.val_ratio = val_ratio
-        self.seed = seed
-        self.camera_mode = camera_mode.lower().strip()
-        self.action_space = action_space
-        self.action_normalization = action_normalization
-        self.rotation_space = rotation_space.lower().strip()
-        self.pose_coordinate_frame = pose_coordinate_frame
-        self._pose_convention = self.action_space
-        self._rotation_format = libero_rotation_format(self.rotation_space)
-        # When True, skip video decoding entirely: drop image keys from
-        # delta_timestamps so LeRobot never touches the mp4, and return
-        # ``video=None`` in __getitem__. Must be set at construction time
-        # because LeRobotDataset is eagerly built in __init__.
-        self._skip_video_loading = bool(skip_video_loading)
+        self._requested_normalization = action_normalization
+        # quantile_rot normalizes against the raw (un-orthonormalized) rotation stats
+        # under "global_raw"; everything else uses "global".
+        self._stats_key = "global_raw" if action_normalization == "quantile_rot" else "global"
+        self._stats_file = self._resolve_stats_file(action_stats_path)
 
-        # Load action normalization stats. ``action_min`` / ``action_range`` are
-        # retained for older LIBERO eval code that knows how to invert a
-        # range-style [-1, 1] normalization.
-        self._norm_stats: dict[str, torch.Tensor] | None = None
-        self.action_min: torch.Tensor | None = None
-        self.action_max: torch.Tensor | None = None
-        self.action_range: torch.Tensor | None = None
-        if self.action_normalization is not None:
-            stats_path = self._resolve_action_stats_path(action_stats_path)
-            # ``quantile_rot`` normalizes against raw (un-orthonormalized) rotation
-            # stats under ``global_raw``; everything else uses ``global``. The bundled
-            # LIBERO stats JSON nests both sub-dicts under metadata, unlike the flat
-            # per-dataset stats consumed by ``ActionBaseDataset.load_action_stats``,
-            # so it is read directly here.
-            stats_key = "global_raw" if self.action_normalization == "quantile_rot" else "global"
-            with open(stats_path) as f:
-                raw_stats = json.load(f)[stats_key]
-            self._norm_stats = {}
-            for key, value in raw_stats.items():
-                self._norm_stats[key] = torch.tensor(value, dtype=torch.float32)  # [D]
-            self._set_range_denormalization_stats()
-            log.info(
-                f"Loaded LIBERO action stats from {stats_path} with action_normalization={self.action_normalization}"
-            )
-
-        # Validate camera mode
-        if self.camera_mode not in {"image", "wrist_image", "concat_view"}:
-            raise ValueError(f"Unsupported camera_mode={camera_mode!r}. Use 'image', 'wrist_image', or 'concat_view'.")
-
-        # Validate split
-        if self.split not in {"train", "val", "valid", "validation", "eval", "test", "full"}:
-            raise ValueError(f"Unsupported {split=}. Use train/val/full.")
-
-        # Align the sampling rate to the dataset's NATIVE fps before building
-        # delta_timestamps. The community ``lerobot/libero_*`` datasets are 10 FPS,
-        # while NVIDIA's internal conversion (which the bundled quantile_rot stats
-        # were computed on) is 20 FPS. Requesting a finer dt than the data supports
-        # makes LeRobot's ``check_delta_timestamps`` reject every window, so clamp
-        # to a frame-aligned rate here.
-        native_fps = self._read_native_fps(root)
-        if native_fps is not None and int(native_fps) != int(self.fps):
-            if self.fps > native_fps or round(native_fps) % round(self.fps) != 0:
-                log.warning(
-                    f"Requested fps={self.fps} is incompatible with dataset native fps={native_fps}; "
-                    f"using native fps={native_fps} for frame sampling. NOTE: the bundled LIBERO "
-                    f"quantile_rot stats were computed on the 20 FPS conversion — for a faithful "
-                    f"reproduction use a 20 FPS LIBERO dataset or recompute stats for this fps."
-                )
-                self.fps = int(native_fps)
-        elif self.fps != 20:
-            log.warning(
-                f"LIBERO frame_wise_relative policy deltas assume 20 FPS; running at fps={self.fps}."
-            )
-
-        # Build delta timestamps based on camera mode
-        dt = 1.0 / self.fps
-
-        # Determine which image keys to use
-        if self.camera_mode == "image":
-            self.image_keys = ["observation.images.image"]
-        elif self.camera_mode == "wrist_image":
-            self.image_keys = ["observation.images.wrist_image"]
-        else:  # concat_view
-            self.image_keys = ["observation.images.image", "observation.images.wrist_image"]
-
-        # Build delta_timestamps for all keys (same convention as PushT: 0 to chunk_length)
-        self.delta_timestamps: dict[str, list[float]] = {}
-        if not self._skip_video_loading:
-            for key in self.image_keys:
-                self.delta_timestamps[key] = [i * dt for i in range(0, chunk_length + 1)]
-        self.delta_timestamps["observation.state"] = [i * dt for i in range(0, chunk_length + 1)]
-        self.delta_timestamps["action"] = [i * dt for i in range(0, chunk_length + 1)]
-
-        # Normalize repo_id and root to lists
-        repo_id_list: list[str] = [repo_id] if isinstance(repo_id, str) else list(repo_id)
-        root_list: list[str | None]
-        if root is None:
-            root_list = [None for _ in repo_id_list]
-        elif isinstance(root, str):
-            root_list = [root]
+        if self._camera_mode == "image":
+            self._video_keys = [_IMAGE_FEATURE]
+        elif self._camera_mode == "wrist_image":
+            self._video_keys = [_WRIST_FEATURE]
         else:
-            root_list = [r for r in root]
+            self._video_keys = [_IMAGE_FEATURE, _WRIST_FEATURE]
 
-        if len(repo_id_list) != len(root_list):
-            raise ValueError(
-                f"Length mismatch: repo_id has {len(repo_id_list)} items, root has {len(root_list)} items."
-            )
+        # Compact, lazy frame index (mirrors DROIDLeRobotDataset): read only the
+        # columns the sample builder needs into contiguous arrays, ordered by global
+        # frame index, so DataLoader worker forks share them copy-on-write.
+        index_parts, episode_parts, task_parts, ts_parts, action_parts = [], [], [], [], []
+        for path in sorted((self._root / "data").glob("chunk-*/file-*.parquet")):
+            table = pq.read_table(path, columns=["index", "episode_index", "task_index", "timestamp", _ACTION_FEATURE])
+            index_parts.append(table["index"].to_numpy())
+            episode_parts.append(table["episode_index"].to_numpy())
+            task_parts.append(table["task_index"].to_numpy())
+            ts_parts.append(table["timestamp"].to_numpy())
+            action_parts.append(np.asarray(table[_ACTION_FEATURE].to_pylist(), dtype=np.float32))
+        if not index_parts:
+            raise FileNotFoundError(f"No data parquet found under {self._root / 'data'}.")
+        order = np.argsort(np.concatenate(index_parts).astype(np.int64), kind="stable")
+        self._row_episode = np.concatenate(episode_parts).astype(np.int64)[order]
+        self._row_task = np.concatenate(task_parts).astype(np.int64)[order]
+        self._row_timestamp = np.concatenate(ts_parts).astype(np.float64)[order]
+        self._row_action = np.concatenate(action_parts, axis=0).astype(np.float32)[order]
 
-        # Load all datasets
-        self.datasets: list[LeRobotDataset] = []
-        self.tasks_dfs: list = []  # Store tasks DataFrames for each dataset
-        for rid, r in zip(repo_id_list, root_list):
-            dataset = LeRobotDataset(
-                repo_id=rid,
-                root=r,
-                delta_timestamps=self.delta_timestamps,  # type: ignore
-                tolerance_s=tolerance_s,
-                force_cache_sync=force_cache_sync,
-                download_videos=download_videos,
-                video_backend=video_backend,
-                episodes=None,  # Load full dataset, filter later
-            )
-            self.datasets.append(dataset)
-            self.tasks_dfs.append(dataset.meta.tasks)
+        assert np.all(np.diff(self._row_episode) >= 0), "episode_index not contiguous after sorting by frame index"
+        ep_vals, ep_starts, ep_counts = np.unique(self._row_episode, return_index=True, return_counts=True)
 
-        # Build index mapping: list of (dataset_idx, local_idx) for valid frames
-        self.index_map: list[tuple[int, int, int]] = []  # (dataset_idx, local_idx, episode_idx)
-        self._episode_boundaries: list[dict[int, tuple[int, int]]] = []
-        self._episode_splits: list[tuple[set[int], set[int]]] = []
-
-        total_episodes = 0
-        total_frames = 0
-        for ds_idx, dataset in enumerate(self.datasets):
-            # Compute episode splits for this dataset
-            train_eps, val_eps = self._compute_episode_splits_for_dataset(dataset)
-            self._episode_splits.append((train_eps, val_eps))
-
-            # Get episodes for current split
-            split_episodes = self._get_split_episodes_for_dataset(ds_idx)
-
-            # Build episode boundaries
-            boundaries = self._build_episode_boundaries_for_dataset(dataset)
-            self._episode_boundaries.append(boundaries)
-
-            # Filter indices
-            indices = self._filter_indices_for_dataset(ds_idx, dataset, split_episodes, boundaries)
-            self.index_map.extend(indices)
-
-            total_episodes += dataset.num_episodes
-            total_frames += len(dataset)
+        # Deterministic per-episode train/val split (seeded; same on every rank).
+        keep = self._split_episode_ids(ep_vals.tolist(), split, val_ratio, seed)
+        kept = np.array([int(v) in keep for v in ep_vals], dtype=bool)
+        self._ep_vals = ep_vals.astype(np.int64)[kept]
+        self._ep_starts = ep_starts.astype(np.int64)[kept]
+        kept_counts = ep_counts.astype(np.int64)[kept]
+        # Within-episode windows only: total - n_kept_episodes * chunk_length valid samples.
+        self._valid_cum = np.cumsum(np.maximum(0, kept_counts - self._chunk_length)).astype(np.int64)
 
         log.info(
-            f"Loaded LIBERO dataset with {len(repo_id_list)} source(s) split={self.split!r} "
-            f"camera_mode={self.camera_mode!r} "
-            f"total_episodes={total_episodes} "
-            f"total_frames={total_frames} "
-            f"valid_indices={len(self.index_map)}"
+            f"Loaded LIBERO dataset root={self._root} split={split!r} camera_mode={camera_mode!r} "
+            f"fps={self._fps} kept_episodes={len(self._ep_vals)}/{len(ep_vals)} "
+            f"valid_indices={int(self._valid_cum[-1]) if self._valid_cum.size else 0}"
         )
 
-    @staticmethod
-    def _read_native_fps(root: str | list[str] | None) -> float | None:
-        """Read the dataset's native FPS from ``<root>/meta/info.json`` when training
-        from a local LeRobot dir. Returns ``None`` for hub-only loads (``root=None``),
-        in which case the requested fps is used as-is and LeRobot validates alignment."""
-        if root is None:
-            return None
-        first = root if isinstance(root, str) else (root[0] if root else None)
-        if not first:
-            return None
-        info_path = Path(first) / "meta" / "info.json"
-        if not info_path.exists():
-            return None
-        try:
-            return float(json.loads(info_path.read_text())["fps"])
-        except (KeyError, ValueError, OSError):
-            return None
-
-    def _compute_episode_splits_for_dataset(self, dataset: LeRobotDataset) -> tuple[set[int], set[int]]:
-        """Compute train/val episode splits deterministically for a single dataset."""
-        total_episodes = int(dataset.meta.total_episodes)
-
-        if not (0.0 < self.val_ratio < 1.0):
-            raise ValueError(f"{self.val_ratio=} must be in (0, 1).")
-
-        n_val = max(1, int(round(total_episodes * self.val_ratio)))
-        # val_eps = set(range(n_val))
-        # train_eps = set(range(n_val, total_episodes))
-
-        # Yihuai: Randomly select validation episodes instead of the first n_val episodes (otherwise task will be repeated)
-        rng = random.Random(self.seed)  # To ensure validation episodes are the same on all ranks
-        val_eps = set(rng.sample(range(total_episodes), n_val))
-        train_eps = set(range(total_episodes)) - val_eps
-
-        log.info(f"train_eps={train_eps}, val_eps={val_eps}")
-
-        return train_eps, val_eps
-
-    def _get_split_episodes_for_dataset(self, ds_idx: int) -> set[int]:
-        """Get the episode set for the current split for a specific dataset."""
-        train_eps, val_eps = self._episode_splits[ds_idx]
-        if self.split in {"val", "valid", "validation", "eval", "test"}:
-            return val_eps
-        elif self.split == "train":
-            return train_eps
-        else:  # full
-            return train_eps | val_eps
-
-    def _build_episode_boundaries_for_dataset(self, dataset: LeRobotDataset) -> dict[int, tuple[int, int]]:
-        """Build a dict of episode_index -> (start_frame, end_frame) for a single dataset."""
-        boundaries: dict[int, tuple[int, int]] = {}
-        for ep in dataset.meta.episodes:
-            ep_idx = int(ep["episode_index"])  # type: ignore[index]
-            start = int(ep["dataset_from_index"])  # type: ignore[index]
-            end = int(ep["dataset_to_index"])  # type: ignore[index]
-            boundaries[ep_idx] = (start, end)
-        return boundaries
-
-    def _filter_indices_for_dataset(
-        self,
-        ds_idx: int,
-        dataset: LeRobotDataset,
-        split_episodes: set[int],
-        boundaries: dict[int, tuple[int, int]],
-    ) -> list[tuple[int, int, int]]:
-        """Filter valid indices for a single dataset, returning (dataset_idx, local_idx, episode_idx)."""
-        index_map: list[tuple[int, int, int]] = []
-        all_meta = list(dataset.meta.episodes)
-
-        for ep_idx in split_episodes:
-            if ep_idx >= len(all_meta):
-                continue
-            ep = all_meta[ep_idx]
-
-            ep_start = int(ep["dataset_from_index"])  # type: ignore[index]
-            ep_end = int(ep["dataset_to_index"])  # type: ignore[index]
-
-            # Valid range: [start, end - chunk_length - 1] inclusive
-            # We drop chunk_length frames at end to ensure we can query up to delta=chunk_length.
-            start = ep_start
-            end = ep_end - self.chunk_length - 1
-
-            if end >= start:
-                for local_idx in range(start, end + 1):
-                    index_map.append((ds_idx, local_idx, ep_idx))
-
-        return index_map
-
-    def __len__(self) -> int:
-        return len(self.index_map)
-
-    def _get_task_description(self, ds_idx: int, item: dict) -> str:
-        """Get task description for the current item from meta/tasks.parquet.
-
-        The tasks.parquet has task descriptions as the DataFrame index (row labels)
-        and task_index as an integer column. We look up by task_index and return
-        the corresponding index name (the actual task description string).
-        """
-        task_idx = item.get("task_index")
-        if task_idx is not None:
-            if isinstance(task_idx, torch.Tensor):
-                task_idx = task_idx.item()
-            task_idx = int(task_idx)
-            tasks_df = self.tasks_dfs[ds_idx]
-            if task_idx in tasks_df["task_index"].values:
-                row = tasks_df[tasks_df["task_index"] == task_idx].iloc[0]
-                # The task description is the index name (row label), not a column value
-                return str(row.name)
-        raise ValueError(f"Task index {task_idx} not found in tasks.parquet for dataset {ds_idx}")
-
-    def _compute_anchored_actions(
-        self,
-        state_raw: torch.Tensor,
-        action_raw: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Compute anchored relative actions (batched).
-
-        Converts frame-wise relative actions to anchored relative actions where each
-        action[t] represents the target pose (after applying action[t] to state[t])
-        expressed in state 0's local coordinate frame.
-
-        Mathematical formulation:
-        1. Compute target in world frame (LIBERO convention):
-           - p_{t+1} = p_t + delta_p[t]  (position addition in world frame)
-           - R_{t+1} = R_delta[t] @ R_t  (rotation composition, delta first)
-        2. Compute anchored (left-multiply by T_0^{-1}):
-           - anchored_pos[t] = R_0^T @ (p_{t+1} - p_0)
-           - anchored_rot[t] = R_0^T @ R_{t+1}
-
-        Args:
-            state_raw: State tensor of shape (T+1, 8): [x, y, z, ax, ay, az, grip1, grip2]
-                where (ax, ay, az) is axis-angle rotation.
-            action_raw: Action tensor of shape (T+1, 7): [dx, dy, dz, dax, day, daz, grip]
-                where (dax, day, daz) is axis-angle rotation delta.
-
-        Returns:
-            anchored_translation: (T, 3) - position in state_0's local frame
-            anchored_rotation_9d: (T, 9) - rotation relative to state_0 as flattened 3x3 matrix
-            gripper: (T, 1) - original gripper commands (unchanged)
-        """
-        # Extract positions and rotations from states
-        p_states = state_raw[:, :3]  # [T+1,3]
-        rotvec_states = state_raw[:, 3:6]  # [T+1,3] - axis-angle
-
-        # Extract deltas from actions (use first T actions)
-        delta_p = action_raw[:-1, :3]  # [T,3]
-        delta_rotvec = action_raw[:-1, 3:6]  # [T,3] - axis-angle delta
-        gripper = action_raw[:-1, 6:7]  # [T,1]
-
-        # Convert all axis-angle to rotation matrices (batched)
-        R_states = convert_rotation(rotvec_states, input_format="axisangle", output_format="matrix")  # [T+1,3,3]
-        R_deltas = convert_rotation(delta_rotvec, input_format="axisangle", output_format="matrix")  # [T,3,3]
-
-        # Initial pose (state 0)
-        p_0 = p_states[0]  # [3]
-        R_0 = R_states[0]  # [3,3]
-        R_0_T = R_0.T  # [3,3] - transpose for inverse rotation
-
-        # Current states for t = 0..T-1
-        p_t = p_states[:-1]  # [T,3]
-        R_t = R_states[:-1]  # [T,3,3]
-
-        # Step 1: Compute target poses in world frame (LIBERO convention)
-        # p_target = p_t + delta_p
-        p_target = p_t + delta_p  # [T,3]
-
-        # R_target = R_delta @ R_t (batched matrix multiply)
-        R_target = torch.bmm(R_deltas, R_t)  # [T,3,3]
-
-        # Step 2: Compute anchored (in state_0's local frame)
-        # anchored_p = R_0^T @ (p_target - p_0)
-        displacement = p_target - p_0  # [T,3]
-        anchored_p = (R_0_T @ displacement.T).T  # [T,3]
-
-        # anchored_R = R_0^T @ R_target (batched)
-        R_0_T_expanded = R_0_T.unsqueeze(0).expand(R_target.shape[0], -1, -1)  # [T,3,3]
-        anchored_R = torch.bmm(R_0_T_expanded, R_target)  # [T,3,3]
-
-        return anchored_p, anchored_R, gripper
-
-    def _convert_rotation_to_repr(self, rotation_matrix: torch.Tensor) -> torch.Tensor:
-        """Convert rotation matrix to the desired representation.
-
-        Args:
-            rotation_matrix: Rotation matrices of shape (T, 3, 3).
-
-        Returns:
-            Rotation in the configured ``rotation_space`` format.
-        """
-        return convert_rotation(rotation_matrix, "matrix", libero_rotation_format(self.rotation_space))
-
-    def _normalizer_filename(self) -> str:
-        rotation_suffix = {
-            "3d": "3d",
-            "6d": "rot6d",
-            "9d": "rot9d",
-        }.get(self.rotation_space)
-        if rotation_suffix is None:
-            raise ValueError(f"Unsupported rotation_space={self.rotation_space!r}.")
-        action_space = self.action_space.replace("-", "_")
-        # Bundled stats encode the EE coordinate frame in the filename, e.g.
-        # ``libero_native_frame_wise_relative_rot6d.json``.
-        return f"{self._embodiment_type}_{self.pose_coordinate_frame}_{action_space}_{rotation_suffix}.json"
-
-    def _resolve_action_stats_path(self, action_stats_path: str | None) -> Path:
-        if action_stats_path is None:
-            stats_path = self._NORMALIZERS_DIR / self._normalizer_filename()
-            if stats_path.exists():
-                return stats_path
-            raise FileNotFoundError(
-                f"Could not find bundled LIBERO action stats at {stats_path}. "
-                "Pass action_stats_path explicitly or regenerate stats with compute_action_stats.py."
-            )
-
-        stats_path = Path(action_stats_path)
-        if stats_path.is_absolute():
-            if stats_path.exists():
-                return stats_path
-            raise FileNotFoundError(f"Could not find action_stats_path={action_stats_path!r}.")
-
-        module_dir = Path(__file__).resolve().parent
-        candidates: list[Path] = []
-        for parent in module_dir.parents:
-            candidates.append(parent / stats_path)
-        candidates.append(self._NORMALIZERS_DIR / stats_path.name)
-        candidates.append(module_dir / stats_path.name)
-        for candidate in candidates:
-            if candidate.exists():
-                return candidate
-        raise FileNotFoundError(
-            f"Could not resolve action_stats_path={action_stats_path!r}; tried: {[str(c) for c in candidates]}"
-        )
-
-    def _set_range_denormalization_stats(self) -> None:
-        if self._norm_stats is None:
-            return
-
-        if self.action_normalization == "minmax":
-            lo_key, hi_key = "min", "max"
-        elif self.action_normalization in ("quantile", "quantile_rot"):
-            lo_key, hi_key = "q01", "q99"
-        else:
-            return
-
-        if lo_key not in self._norm_stats or hi_key not in self._norm_stats:
-            raise ValueError(
-                f"Action stats for {self.action_normalization!r} normalization require "
-                f"{lo_key!r} and {hi_key!r} entries."
-            )
-        self.action_min = self._norm_stats[lo_key]  # [D]
-        self.action_max = self._norm_stats[hi_key]  # [D]
-        action_range = self.action_max - self.action_min  # [D]
-        self.action_range = torch.clamp(action_range, min=1e-6)  # [D]
-
-    def __getitem__(self, idx: int, _retry_count: int = 0) -> dict[str, torch.Tensor | str]:
-        """Get a single item from the dataset."""
-        max_retries = 10
-        ds_idx, local_idx, ep_idx = self.index_map[idx]
-        dataset = self.datasets[ds_idx]
-        try:
-            item = dataset[local_idx]
-        except Exception as e:
-            log.warning(
-                f"Error loading item (retry {_retry_count}/{max_retries}): idx={idx}, ds_idx={ds_idx}, "
-                f"local_idx={local_idx}, ep_idx={ep_idx}, repo_id={dataset.meta.repo_id}, error={e}"
-            )
-            if _retry_count >= max_retries:
-                raise RuntimeError(f"Failed to load data after {max_retries} retries") from e
-            new_idx = random.randint(0, len(self) - 1)
-            return self.__getitem__(new_idx, _retry_count + 1)
-
-        if self.mode == "joint":
-            mode = random.choice(["forward_dynamics", "inverse_dynamics", "policy", "image2video"])
-        else:
-            mode = self.mode
-
-        # Get task description for ai_caption
-        task_description = self._get_task_description(ds_idx, item)
-
-        # Process video based on camera mode (skipped entirely when
-        # skip_video_loading=True; image keys are also absent from
-        # delta_timestamps so LeRobot never decoded them).
-        video: torch.Tensor | None
-        if self._skip_video_loading:
-            video = None
-        else:
-            if self.camera_mode == "concat_view":
-                # Load both cameras and concatenate horizontally
-                video_1: torch.Tensor = item["observation.images.image"]
-                video_2: torch.Tensor = item["observation.images.wrist_image"]
-
-                # Resize each if needed
-                if video_1.shape[-1] != self.image_size or video_1.shape[-2] != self.image_size:
-                    video_1 = F.resize(video_1, [self.image_size, self.image_size])
-                if video_2.shape[-1] != self.image_size or video_2.shape[-2] != self.image_size:
-                    video_2 = F.resize(video_2, [self.image_size, self.image_size])
-
-                # Concatenate along width dimension (last dim for TCHW)
-                video_tchw = torch.cat([video_1, video_2], dim=-1)  # (T, C, H, W*2)
-            else:
-                # Single camera mode
-                image_key = self.image_keys[0]
-                video_tchw = item[image_key]
-
-                # Resize if needed
-                if video_tchw.shape[-1] != self.image_size or video_tchw.shape[-2] != self.image_size:
-                    video_tchw = F.resize(video_tchw, [self.image_size, self.image_size])
-
-            # Convert to uint8 and transpose to (C, T, H, W)
-            video = (video_tchw * 255).clamp(0, 255).to(torch.uint8).permute(1, 0, 2, 3)
-
-        # Action (raw): LIBERO actions are 7D (6 DoF + gripper)
-        action_raw: torch.Tensor = item["action"]
-        # State (raw): LIBERO state is 8D (6 DoF + 2 gripper states)
-        state_raw: torch.Tensor = item["observation.state"]
-
-        # Action: (T+1, D) -> (T, D)
-        # Take all but last action
-        # LIBERO action format: [x, y, z, ax, ay, az, gripper] (7D) where (ax,ay,az) is axis-angle
-
-        if self.action_space == "relative":
-            # Compute anchored relative actions
-            # Returns: translation (T, 3), rotation_matrix (T, 3, 3), gripper (T, 1)
-            translation, rotation_matrix, gripper = self._compute_anchored_actions(state_raw, action_raw.clone())
-        elif self.action_space == "frame_wise_relative":
-            action = action_raw[:-1].clone()  # [T,7]
-            translation = action[:, :3]  # [T,3]
-            rotation_rotvec = action[:, 3:6]  # [T,3]
-            gripper = action[:, 6:]  # [T,1]
-            rotation_matrix = convert_rotation(
-                rotation_rotvec, input_format="axisangle", output_format="matrix"
-            )  # [T,3,3]
-        else:
-            raise ValueError(f"Unsupported action space: {self.action_space}")
-
-        rotation = self._convert_rotation_to_repr(rotation_matrix)  # [T,rot_dim]
-        action = torch.cat([translation, rotation, gripper], dim=-1)  # [T,action_dim]
-
-        # Compute idle_frames from the raw (un-normalized) action, only when the
-        # action layout has correct per-frame idle semantics (frame_wise_relative
-        # ⇔ backward_framewise). The other action_spaces ("relative",
-        # "absolute") encode per-frame motion differently and would not give
-        # meaningful idle counts under the same threshold check.
-        idle_frames: torch.Tensor | None = None
-        if self.action_space == "frame_wise_relative":
-            try:
-                spec = build_action_spec(Pos(), Rot(libero_rotation_format(self.rotation_space)), Gripper())
-                n = compute_idle_frames(action, spec)
-                idle_frames = torch.tensor(n, dtype=torch.long)
-            except (ValueError, TypeError):
-                idle_frames = None
-
-        if self.action_normalization is not None and self._norm_stats is not None and self.action_min is not None:
-            if action.shape[-1] != self.action_min.shape[0]:
-                raise ValueError(
-                    f"Action dimension {action.shape[-1]} does not match stats dimension "
-                    f"{self.action_min.shape[0]}. Recompute stats for the current "
-                    f"rotation_space={self.rotation_space!r} and action_space={self.action_space!r}."
-                )
-            method = "quantile" if self.action_normalization == "quantile_rot" else self.action_normalization
-            action = normalize_action(action, method, self._norm_stats)  # [T,D]
-
-        # Index
-        key = torch.tensor([local_idx], dtype=torch.long)
-
-        if self.camera_mode == "image":
-            viewpoint = "third_person_view"
-        elif self.camera_mode == "wrist_image":
-            viewpoint = "wrist_view"
-        else:
-            viewpoint = "concat_view"
-
-        result: dict[str, torch.Tensor | str] = {
-            "source_repo_id": dataset.meta.repo_id,
-            "video": video,
-            "action": action,
-            "action_raw": action_raw,
-            "conditioning_fps": torch.tensor(self.fps, dtype=torch.long),
-            "prompt": task_description,
-            "ai_caption": task_description,
-            "mode": mode,
-            "state": state_raw,
-            "action_space": self.action_space,
-            "rotation_space": self.rotation_space,
-            "pose_coordinate_frame": self.pose_coordinate_frame,
-            "__key__": key,
-            "domain_id": torch.tensor(self.domain_id, dtype=torch.long),
-            "viewpoint": viewpoint,
-        }
-        if idle_frames is not None:
-            result["idle_frames"] = idle_frames
-
-        if self.camera_mode == "concat_view" and not self._skip_video_loading:
-            result["additional_view_description"] = (
-                "The left half shows the third-person view; the right half shows the wrist-mounted camera."
-            )
-
-        return result
+    # ---- spec / dims -------------------------------------------------------
 
     @property
     def action_dim(self) -> int:
-        return libero_action_dim(self.rotation_space)
+        return libero_action_dim(self._rotation_space)
+
+    def _action_spec(self) -> ActionSpec:
+        return build_action_spec(Pos(), Rot(libero_rotation_format(self._rotation_space)), Gripper())
+
+    @classmethod
+    def _stats_path(cls) -> Path:
+        # Base classmethod fallback; the instance uses self._stats_file (which also
+        # honors action_stats_path + the rotation/coordinate-frame-specific filename).
+        return _NORMALIZERS_DIR / "libero_native_frame_wise_relative_rot6d.json"
+
+    # ---- normalization (nested global/global_raw + quantile_rot) ------------
+
+    def _bundled_stats_filename(self) -> str:
+        rotation_suffix = {"3d": "3d", "6d": "rot6d", "9d": "rot9d"}.get(self._rotation_space)
+        if rotation_suffix is None:
+            raise ValueError(f"Unsupported rotation_space={self._rotation_space!r}.")
+        action_space = "frame_wise_relative"
+        return f"{self._embodiment_type}_{self._pose_coordinate_frame}_{action_space}_{rotation_suffix}.json"
+
+    def _resolve_stats_file(self, action_stats_path: str | None) -> Path:
+        if action_stats_path:
+            p = Path(action_stats_path)
+            if not p.is_absolute():
+                p = _NORMALIZERS_DIR / p.name
+            if not p.exists():
+                raise FileNotFoundError(f"action_stats_path not found: {action_stats_path!r}")
+            return p
+        p = _NORMALIZERS_DIR / self._bundled_stats_filename()
+        if not p.exists():
+            raise FileNotFoundError(
+                f"Bundled LIBERO stats not found at {p}. Pass action_stats_path or recompute stats."
+            )
+        return p
+
+    def _load_norm_stats(self) -> dict[str, torch.Tensor]:
+        if self._norm_stats is None:
+            raw = json.loads(self._stats_file.read_text())[self._stats_key]
+            self._norm_stats = {
+                k: torch.tensor(v, dtype=torch.float32) for k, v in raw.items() if k in _STAT_KEYS
+            }
+        return self._norm_stats
+
+    # ---- index helpers -----------------------------------------------------
+
+    @staticmethod
+    def _split_episode_ids(ep_ids: list[int], split: str, val_ratio: float, seed: int) -> set[int]:
+        if split == "full":
+            return set(int(v) for v in ep_ids)
+        if not (0.0 < val_ratio < 1.0):
+            raise ValueError(f"val_ratio must be in (0, 1), got {val_ratio}.")
+        n_val = max(1, int(round(len(ep_ids) * val_ratio)))
+        rng = random.Random(seed)  # identical selection on every rank
+        val = set(int(v) for v in rng.sample(list(ep_ids), n_val))
+        if split == "train":
+            return set(int(v) for v in ep_ids) - val
+        return val  # val/valid/validation/eval/test
+
+    def __len__(self) -> int:
+        return int(self._valid_cum[-1]) if self._valid_cum.size else 0
 
     def get_shuffle_blocks(self) -> list[tuple[int, int]]:
-        """Per-episode contiguous ``(start, length)`` blocks over the flat ``index_map``.
-
-        ``ActionIterableShuffleDataset`` shuffles the ORDER of these blocks and shards
-        them disjointly across ``(rank, worker)``, while keeping the windows WITHIN a
-        block sequential (I/O locality + decorrelated batches). ``index_map`` is built
-        per ``(dataset, episode)``, so runs of equal consecutive ``(ds_idx, ep_idx)``
-        form one episode block.
-        """
+        """Per-episode ``(start, length)`` flat-index blocks for
+        ``ActionIterableShuffleDataset`` (shuffle block ORDER + shard across
+        ranks, sequential within a block)."""
         blocks: list[tuple[int, int]] = []
-        if not self.index_map:
-            return blocks
-        start = 0
-        for i in range(1, len(self.index_map) + 1):
-            at_end = i == len(self.index_map)
-            if at_end or (
-                self.index_map[i][0] != self.index_map[start][0]
-                or self.index_map[i][2] != self.index_map[start][2]
-            ):
-                blocks.append((start, i - start))
-                start = i
+        prev = 0
+        for c in np.asarray(self._valid_cum).tolist():
+            c = int(c)
+            if c > prev:
+                blocks.append((prev, c - prev))
+            prev = c
         return blocks
+
+    # ---- sample build ------------------------------------------------------
+
+    def __getitem__(self, idx: int) -> dict[str, Any]:
+        mode = self._choose_mode()
+        idx = int(idx)
+        ep = int(np.searchsorted(self._valid_cum, idx, side="right"))
+        prev = int(self._valid_cum[ep - 1]) if ep > 0 else 0
+        start = int(self._ep_starts[ep]) + (idx - prev)
+        episode_index = int(self._ep_vals[ep])
+        episode = self._episodes[episode_index]
+
+        stop = start + self._chunk_length + 1
+        timestamps = [float(self._row_timestamp[j]) for j in range(start, stop)]
+        video = self._load_video(episode, timestamps)
+
+        # frame_wise_relative: chunk per-frame deltas are the stored actions directly.
+        raw = self._row_action[start : start + self._chunk_length]  # [chunk, 7]
+        action = self._build_frame_wise_action(raw)
+
+        task = self._tasks[int(self._row_task[start])]
+        ai_caption = random.choice([p.strip() for p in task.split(" | ") if p.strip()] or [task])
+
+        extras: dict[str, Any] = {}
+        if self._camera_mode == "concat_view":
+            extras["additional_view_description"] = (
+                "The left half shows the third-person view; the right half shows the wrist-mounted camera."
+            )
+        return self._build_result(mode=mode, video=video, action=action, ai_caption=ai_caption, **extras)
+
+    def _build_frame_wise_action(self, raw: np.ndarray) -> torch.Tensor:
+        raw_t = torch.from_numpy(np.ascontiguousarray(raw)).float()  # [chunk, 7]
+        translation = raw_t[:, 0:3]
+        rotation_matrix = convert_rotation(raw_t[:, 3:6], input_format="axisangle", output_format="matrix")
+        rotation = convert_rotation(
+            rotation_matrix, input_format="matrix", output_format=libero_rotation_format(self._rotation_space)
+        )
+        gripper = raw_t[:, 6:7]
+        return torch.cat([translation, rotation, gripper], dim=-1)  # [chunk, action_dim]
+
+    def _load_video(self, episode: dict[str, Any], timestamps: list[float]) -> torch.Tensor:
+        frames_by_view = {}
+        for key in self._video_keys:
+            from_ts = float(episode.get(f"videos/{key}/from_timestamp", 0.0))
+            frames = decode_video_frames(
+                self._video_path(episode, key),
+                [from_ts + ts for ts in timestamps],
+                self._tolerance_s,
+            )  # [T, C, H, W] in [0, 1]
+            frames = self._resize(frames)
+            frames_by_view[key] = frames
+        if self._camera_mode == "concat_view":
+            # third-person (left) + wrist (right), horizontally concatenated -> [T, C, H, 2W]
+            return torch.cat([frames_by_view[_IMAGE_FEATURE], frames_by_view[_WRIST_FEATURE]], dim=-1)
+        return frames_by_view[self._video_keys[0]]
+
+    def _resize(self, frames: torch.Tensor) -> torch.Tensor:
+        if frames.shape[-1] == self._image_size and frames.shape[-2] == self._image_size:
+            return frames
+        return F.interpolate(
+            frames, size=(self._image_size, self._image_size), mode="bilinear", align_corners=False
+        )
