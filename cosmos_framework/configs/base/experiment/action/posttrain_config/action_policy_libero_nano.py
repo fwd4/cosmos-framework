@@ -49,10 +49,9 @@ def _action_policy_libero_nano_model_config() -> dict:
     VAE encode durations covering the chunk_length=16 (-> 17 frames) policy windows
     plus the longer forward/inverse-dynamics windows the action head also trains on."""
     cfg = copy.deepcopy(NANO_MODEL_CONFIG)  # action_gen=True, max_action_dim=64
-    # -1 = no packed-token cap. LIBERO is low-res (192x320 model canvas -> a few
-    # hundred tokens/sample), so a cap would just throttle packing; uncapped lets
-    # each rank pack the full max_samples_per_batch (H200 has ample memory headroom).
-    cfg["max_num_tokens_after_packing"] = -1
+    # Cap the packed sequence. Uncapped (-1) + a large max_samples_per_batch packs
+    # one very long sequence and OOMs even on H200; 74000 keeps the GA-validated bound.
+    cfg["max_num_tokens_after_packing"] = 74000
     cfg["activation_checkpointing"]["mode"] = "selective"
     cfg["diffusion_expert_config"]["load_weights_from_pretrained"] = False
     cfg["rectified_flow_training_config"]["loss_scale"] = 10.0
@@ -193,7 +192,7 @@ action_policy_libero_nano = LazyDict(
         dataloader_train=L(PackingDataLoader)(
             audio_sample_rate=48000,
             dataset_name="action_libero",
-            max_samples_per_batch=256,  # low-res LIBERO + uncapped packing; global = 256 x DP8 x grad_accum1 = 2048
+            max_samples_per_batch=128,  # peak-mem bound (256 OOMs on H200); global = 128 x DP8 x grad_accum2 = 2048
             max_sequence_length=None,  # None disables token packing (TOML can't express null)
             patch_spatial=2,
             sound_latent_fps=0,

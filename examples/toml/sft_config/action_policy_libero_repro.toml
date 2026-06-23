@@ -31,9 +31,9 @@ wandb_mode   = "online"
 
 [model]
 precision = "bfloat16"
-# -1 = uncapped packing. LIBERO is low-res (192x320 model canvas), so each rank packs
-# the full max_samples_per_batch without a token cap throttling it (H200 has headroom).
-max_num_tokens_after_packing = -1
+# Cap the packed sequence (GA-validated). Uncapped (-1) packs one very long sequence
+# and OOMs even on H200.
+max_num_tokens_after_packing = 74000
 
 [model.parallelism]
 data_parallel_shard_degree     = 8    # 8-GPU model shard; set replicate for multi-node HSDP
@@ -56,8 +56,7 @@ warm_up_steps = [2000]    # GA recipe
 [trainer]
 max_iter        = 10000
 logging_iter    = 50
-grad_accum_iter = 1       # global batch = max_samples_per_batch 256 x DP 8 x 1 = 2048
-                          # (single 256-sample fwd > two 128 micro-batches: better MFU at low-res)
+grad_accum_iter = 2       # global batch = max_samples_per_batch 128 x DP 8 x 2 = 2048
 
 [checkpoint]
 load_path = "${oc.env:BASE_CHECKPOINT_PATH}"
@@ -70,6 +69,6 @@ save_iter = 1000          # ckpt 2000 is the Table-20 reference; keep <=2000 cad
 # use --action-normalization quantile_rot + the bundled libero rot6d stats on the
 # server so denormalization matches training. See docs/action_policy_libero_sft.md.
 #
-# max_samples_per_batch is 256 in the experiment (H200, ~60% util at 128 left headroom).
+# max_samples_per_batch is 128 in the experiment (256 OOMs: per-forward peak, not grad_accum).
 # On lower-memory GPUs reduce at launch:
 #   --opts dataloader_train.max_samples_per_batch=64
