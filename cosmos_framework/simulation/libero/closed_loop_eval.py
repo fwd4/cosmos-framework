@@ -881,18 +881,25 @@ class _LiberoEnvFactory:
         self.mujoco_gl = mujoco_gl
 
     def __call__(self) -> Any:
-        os.environ.setdefault("MUJOCO_GL", self.mujoco_gl)
+        # Resolve to a concrete GPU; -1 (auto) makes EGL device selection race/fail
+        # across spawned workers (EGLError / "'EGLGLContext' object has no attribute
+        # '_context'"). Set the GL backend + pin the EGL device BEFORE importing
+        # OffScreenRenderEnv (which dlopen's the GL stack at import).
+        dev = self.render_gpu_device_id if self.render_gpu_device_id >= 0 else 0
+        os.environ["MUJOCO_GL"] = self.mujoco_gl
         if self.mujoco_gl == "egl":
-            os.environ.setdefault("PYOPENGL_PLATFORM", "egl")
+            os.environ["PYOPENGL_PLATFORM"] = "egl"
+            os.environ["MUJOCO_EGL_DEVICE_ID"] = str(dev)
+            os.environ["EGL_DEVICE_ID"] = str(dev)
         elif self.mujoco_gl == "osmesa":
-            os.environ.setdefault("PYOPENGL_PLATFORM", "osmesa")
+            os.environ["PYOPENGL_PLATFORM"] = "osmesa"
         from libero.libero.envs import OffScreenRenderEnv as _OffScreenRenderEnv
 
         return _OffScreenRenderEnv(
             bddl_file_name=self.bddl_file_name,
             camera_heights=self.camera_heights,
             camera_widths=self.camera_widths,
-            render_gpu_device_id=self.render_gpu_device_id,
+            render_gpu_device_id=dev,
         )
 
 
