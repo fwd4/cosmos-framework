@@ -7,31 +7,33 @@
 # LIBERO-10 result (~97.4% @ ckpt 2000). Drives cosmos_framework.scripts.train
 # against examples/toml/sft_config/action_policy_libero_repro.toml.
 #
-# REPRODUCTION: point LIBERO_ROOT at the libero_10 LeRobot conversion ONLY. The
-# 4-suite mix dilutes libero_10 to ~1 pass in 2000 steps (~82%); libero_10 alone
-# is ~2.7 passes (~97%). See docs/action_policy_libero_sft.md.
+# REPRODUCTION: point LIBERO_ROOT at the libero_10 suite ONLY. The full suite
+# mix dilutes libero_10 to ~1 pass in 2000 steps (~82%); libero_10 alone is ~2.7
+# passes (~97%). Use the 20 FPS nvidia/LIBERO_LeRobot_v3. See docs/action_policy_libero_sft.md.
 #
 # Required env vars:
-#   LIBERO_ROOT           local LIBERO-10 LeRobot dataset dir (no default)
+#   LIBERO_ROOT           local LIBERO-10 LeRobot dataset dir, e.g. <dir>/libero_10 (no default)
 # Optional env vars (defaults below; override to relocate data/checkpoints):
-#   LIBERO_REPO_ID        default: lerobot/libero_10 (identifier; local root wins)
 #   BASE_CHECKPOINT_PATH  default: examples/checkpoints/Cosmos3-Nano
 #   WAN_VAE_PATH          default: examples/checkpoints/wan22_vae/Wan2.2_VAE.pth
 #   HF_TOKEN              if any tokenizer download requires gated HF access
 #   OUTPUT_ROOT           default: outputs/train
 #
+# Pre-sync the 20 FPS suite once:
+#   hf download nvidia/LIBERO_LeRobot_v3 --repo-type dataset --include 'libero_10/**' --local-dir <dir>
+#   export LIBERO_ROOT=<dir>/libero_10
+#
 # Usage (8-GPU allocation, inside the training container, from the repo root):
-#   LIBERO_ROOT=/path/to/libero_10_lerobot bash examples/launch_sft_action_policy_libero.sh
+#   LIBERO_ROOT=<dir>/libero_10 bash examples/launch_sft_action_policy_libero.sh
 
 TOML_FILE="examples/toml/sft_config/action_policy_libero_repro.toml"
 : "${BASE_CHECKPOINT_PATH:=examples/checkpoints/Cosmos3-Nano}"
 
 # LIBEROLeRobotDataset reads ${oc.env:LIBERO_ROOT} directly (a LOCAL LeRobot dir);
-# export it so torchrun (launched in this shell) inherits it. Pre-sync once:
-#   hf download lerobot/libero_10 --repo-type dataset --local-dir "$LIBERO_ROOT"
+# export it so torchrun (launched in this shell) inherits it.
 export LIBERO_ROOT="${LIBERO_ROOT:-}"
 
-EXTRA_DATASET_CHECK='[[ -f "$LIBERO_ROOT/meta/info.json" ]] || { echo "ERROR: LIBERO_ROOT must be a local LeRobot dir containing meta/info.json (got: '\''$LIBERO_ROOT'\''). Pre-sync: hf download lerobot/libero_10 --repo-type dataset --local-dir <dir>. See docs/action_policy_libero_sft.md" >&2; exit 1; }'
+EXTRA_DATASET_CHECK='[[ -f "$LIBERO_ROOT/meta/info.json" ]] || { echo "ERROR: LIBERO_ROOT must be a local LeRobot dir containing meta/info.json (got: '\''$LIBERO_ROOT'\''). Pre-sync: hf download nvidia/LIBERO_LeRobot_v3 --repo-type dataset --include '\''libero_10/**'\'' --local-dir <dir> (then LIBERO_ROOT=<dir>/libero_10). See docs/action_policy_libero_sft.md" >&2; exit 1; }'
 
 # Extra Hydra overrides from the environment: a space-separated string word-split into
 # the TAIL_OVERRIDES array. An exported string survives `bash <wrapper>` (a child

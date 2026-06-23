@@ -20,17 +20,21 @@ Pieces:
 ## 1. Data
 
 `LIBEROLeRobotDataset` reads a **local** LeRobot dir directly (parquet + video,
-like `DROIDLeRobotDataset`) — set `LIBERO_ROOT` to it. Pre-sync the HF dataset
-once to shared storage:
+like `DROIDLeRobotDataset`) — set `LIBERO_ROOT` to it. Use NVIDIA's **20 FPS**
+conversion [`nvidia/LIBERO_LeRobot_v3`](https://huggingface.co/datasets/nvidia/LIBERO_LeRobot_v3)
+(public, OpenMDW-1.1), which is what the bundled `quantile_rot` stats and the
+20 Hz eval cadence assume. It ships one subdirectory per suite, so pre-sync just
+`libero_10`:
 
 ```bash
-hf download lerobot/libero_10 --repo-type dataset --local-dir <nfs>/libero_10
-export LIBERO_ROOT=<nfs>/libero_10
+hf download nvidia/LIBERO_LeRobot_v3 --repo-type dataset \
+  --include 'libero_10/**' --local-dir <nfs>/LIBERO_LeRobot_v3
+export LIBERO_ROOT=<nfs>/LIBERO_LeRobot_v3/libero_10
 ```
 
-**For the Table-20 number, use `libero_10` ALONE.** Training on the full 4-suite
-mix (libero_10 / object / spatial / goal) gives libero_10 only ~1 pass in 2000
-steps (~82%); libero_10 alone is ~2.7 passes (~97%). For more suites, add more
+**For the Table-20 number, use `libero_10` ALONE.** Training on the full suite
+mix dilutes libero_10 to ~1 pass in 2000 steps (~82%); libero_10 alone is ~2.7
+passes (~97%). For more suites, sync the other subdirs and add more
 `datasets=dict(...)` entries to the experiment's dataloader.
 
 It uses `frame_wise_relative` rot6d actions (10D = `pos(3) + rot6d(6) +
@@ -38,15 +42,13 @@ gripper(1)`), `concat_view` (third-person + wrist, each resized to 256×256,
 concatenated horizontally → 256×512), normalized with `quantile_rot` against the
 bundled stats.
 
-**FPS-agnostic.** The loader windows by frame index and decodes video at each
-frame's real timestamp, so it works with any LeRobot LIBERO dataset regardless of
-FPS (no `delta_timestamps` grid). `fps` is metadata only (`conditioning_fps` +
-prompt duration). The public `lerobot/libero_*` datasets are **10 FPS** while the
-bundled `quantile_rot` stats came from NVIDIA's **20 FPS** conversion — but this
-does **not** inherently hurt success rate: normalization is an unclamped affine
-bijection and train+eval share the same stats, so the scale cancels (same reason
-DROID is fine at its own 15 FPS). What matters is train↔eval consistency. See
-[§5](#5-fps--stats).
+**FPS-agnostic loader.** It windows by frame index and decodes video at each
+frame's real timestamp (no `delta_timestamps` grid), so any LeRobot LIBERO dataset
+loads regardless of its `fps` label, and `conditioning_fps` is read from the
+dataset's own `meta/info.json`. Prefer the 20 FPS `nvidia/LIBERO_LeRobot_v3` so
+`conditioning_fps=20` matches the stats and the eval (serve with `--fps 20`). The
+community `lerobot/libero_*` repos carry the *same frames* but label them 10 FPS;
+see [§5](#5-fps--stats).
 
 **Model-input resolution = 192×320.** The 256×512 concat is aspect-2.0, so with
 `resolution=None` the `ActionTransformPipeline` snaps it to the closest `"256"`
@@ -150,26 +152,27 @@ timestamp** — so it never builds LeRobot's `delta_timestamps` grid and works a
 any native FPS. (The earlier `delta_timestamps` port failed on the 10 FPS public
 dataset because a 1/20 s grid doesn't land on 10 FPS frames.)
 
-- **Public `lerobot/libero_*` = 10 FPS.** NVIDIA's internal conversion is 20 FPS,
-  which the bundled `quantile_rot` stats were computed on. There is no published
-  20 FPS LeRobot LIBERO dataset (the LIBERO sim is ~20 Hz, so one is producible
-  from the raw HDF5 via `huggingface/lerobot-libero`).
-- **Does the FPS gap hurt success rate? Largely no — what matters is train↔eval
-  consistency, not matching 20 FPS.** `normalize_action(quantile)` is an *unclamped*
-  affine map `2(a−q01)/(q99−q01)−1`, and training and the eval server use the *same*
-  stats file, so the absolute scale cancels — 10 FPS deltas just produce
-  larger-than-[-1,1] normalized targets that the model fits and the server inverts
-  exactly. No information is clipped. This is the same reason DROID trains+evals
-  fine at its own 15 FPS: it's self-consistent. So the earlier "stats under-scale"
-  framing overstated the risk.
-- **What you DO need to keep consistent** between training and closed-loop eval:
-  (1) the same stats file + `--action-normalization quantile_rot`; (2) the action
-  *application rate* — actions trained as 10 FPS (0.1 s) deltas must be applied to
-  the env at that cadence (`--action_horizon` + the env step rate), or the arm
-  moves at the wrong speed; (3) resolution + prompt (§4). Get these right and a
-  self-consistent 10 FPS run should learn a strong policy.
-- **Only reason to prefer true 20 FPS:** to reproduce the paper's *exact* dynamics
-  / Table-20 number. Otherwise either (a) a 20 FPS conversion or (b) recomputed
-  10 FPS stats via `action_stats_path` are optional, not required.
-- `fps` in the recipe only sets `conditioning_fps` and the prompt duration; it
-  does not change which frames are sampled.
+- **Use the 20 FPS `nvidia/LIBERO_LeRobot_v3`.** LIBERO demos are recorded at
+  robosuite's default 20 Hz `control_freq`. NVIDIA's conversion labels them 20 FPS
+  (correct); the community `lerobot/libero_*` repos contain the *same frames* (e.g.
+  libero_10 = 379 eps / 101,469 frames in both) but label them 10 FPS. Nothing was
+  subsampled — only the `fps` metadata differs.
+- **Why 20 FPS is the clean choice for THIS eval.** The closed-loop harness steps
+  the env at LIBERO's default 20 Hz and applies one predicted action per
+  `env.step` (no action-repeat, no `control_freq` override — see `_get_libero_env`
+  / `_run_episode`). So the policy's per-action cadence must be 20 Hz. Training on
+  the 20 FPS dataset makes `conditioning_fps=20` (read from `meta/info.json`),
+  matches the bundled `quantile_rot` stats, and lines up with the eval's 20 Hz —
+  serve with `--fps 20`, no harness change.
+- **The normalization gap was never the issue.** `normalize_action(quantile)` is an
+  *unclamped* affine map `2(a−q01)/(q99−q01)−1`; training and the server share the
+  same stats file, so any scale cancels (same reason DROID is fine at its own
+  15 FPS). The real consistency requirement is the **control rate**, which the
+  20 FPS dataset satisfies by construction.
+- **If you must use a differently-labelled dataset**, keep cadence consistent:
+  serve at the dataset's `fps`, and if its frames are genuinely sub-sampled (fewer
+  frames than the 20 Hz original), either run the eval env at a matching
+  `control_freq` or action-repeat. With `nvidia/LIBERO_LeRobot_v3` none of this is
+  needed.
+- `fps` only sets `conditioning_fps` + prompt duration; the loader always windows
+  by frame index and decodes at real timestamps.

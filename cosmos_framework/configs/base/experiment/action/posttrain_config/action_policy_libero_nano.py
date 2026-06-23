@@ -211,11 +211,13 @@ action_policy_libero_nano = LazyDict(
                     libero=dict(
                         ratio=1,
                         dataset=L(get_action_libero_sft_dataset)(
-                            # Local LeRobot dir for the libero_10 conversion ONLY (Table-20
-                            # reproduction; 4-suite mix -> ~82%, see module docstring). Pre-sync:
-                            #   hf download lerobot/libero_10 --repo-type dataset --local-dir $LIBERO_ROOT
+                            # Local LeRobot dir for the libero_10 suite ONLY (Table-20
+                            # reproduction; full suite mix -> ~82%, see module docstring). Use the
+                            # 20 FPS nvidia/LIBERO_LeRobot_v3 (matches the bundled stats + 20 Hz eval):
+                            #   hf download nvidia/LIBERO_LeRobot_v3 --repo-type dataset \
+                            #     --include 'libero_10/**' --local-dir <dir>   # LIBERO_ROOT=<dir>/libero_10
                             root="${oc.env:LIBERO_ROOT}",
-                            fps=20,  # metadata only (FPS-agnostic loader); sets conditioning_fps / prompt duration
+                            fps=20,  # metadata only (FPS-agnostic loader reads native fps from info.json)
                             chunk_length=16,
                             image_size=256,  # concat_view -> 256x512
                             mode="policy",
