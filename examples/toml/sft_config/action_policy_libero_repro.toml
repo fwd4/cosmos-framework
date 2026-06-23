@@ -1,0 +1,73 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: OpenMDW-1.1
+
+# ============================================================================
+# LIBERO action-policy SFT — run config for the `action_policy_libero_nano`
+# experiment (Cosmos3-Nano LIBERO-10 reproduction, Table 20 ~97.4% @ ckpt 2000).
+# The recipe knobs (optimizer/lr, scheduler, grad_clip, count-based batch,
+# action-head skip-on-load, dataset knobs) live in the registered experiment;
+# this file only sets run-level scalars (iters, ckpt cadence, parallelism shape,
+# wandb, VAE path).
+#
+# REPRODUCTION: train on libero_10 ALONE. The 4-suite mix dilutes libero_10 to
+# ~1 pass in 2000 steps (~82%); libero_10 alone is ~2.7 passes (~97%). Point
+# LIBERO_ROOT (and LIBERO_REPO_ID) at the libero_10 LeRobot conversion only.
+#
+# Env required:
+#   LIBERO_ROOT=/path/to/libero_10_lerobot
+#   LIBERO_REPO_ID=lerobot/libero_10            # optional; defaults to lerobot/libero_10
+#   BASE_CHECKPOINT_PATH=<Cosmos3-Nano DCP dir>
+#   WAN_VAE_PATH=<Wan2.2_VAE.pth>
+#   IMAGINAIRE_OUTPUT_ROOT=/path/to/output_root   # persist checkpoints
+# ============================================================================
+
+[job]
+task         = "vfm"
+experiment   = "action_policy_libero_nano"
+project      = "cosmos3_action_libero"
+group        = "action_sft"
+name         = "action_policy_libero_repro"
+wandb_mode   = "online"
+
+[model]
+precision = "bfloat16"
+# GA: uncap-ish packed sequence so full 256x512 concat_view windows are not truncated.
+max_num_tokens_after_packing = 74000
+
+[model.parallelism]
+data_parallel_shard_degree     = 8    # 8-GPU model shard; set replicate for multi-node HSDP
+data_parallel_replicate_degree = 1
+
+[model.activation_checkpointing]
+mode           = "selective"          # GA recipe (full is slower; selective fits 256x512)
+save_ops_regex = ["fmha"]
+
+[model.tokenizer]
+vae_path = "${oc.env:WAN_VAE_PATH}"
+
+[optimizer]
+lr = 5.0e-05
+
+[scheduler]
+cycle_lengths = [10000]   # match max_iter
+warm_up_steps = [2000]    # GA recipe
+
+[trainer]
+max_iter        = 10000
+logging_iter    = 50
+grad_accum_iter = 2       # GA recipe (global batch = 128 x 8 ranks x 2)
+
+[checkpoint]
+load_path = "${oc.env:BASE_CHECKPOINT_PATH}"
+save_iter = 1000          # ckpt 2000 is the Table-20 reference; keep <=2000 cadence
+
+# NOTE (train/serve parity — see GitHub issue NVIDIA/cosmos-framework#50): training
+# here builds 256x512 concat_view inputs (image_size=256 x 2 cameras) at 20 FPS. The
+# closed-loop eval server MUST present the SAME resolution and the SAME prompt suffix
+# ("...is of 256x512 resolution.", duration from chunk_length/fps) — a 192x320 / "0.0s"
+# train-vs-256x512 / "0.8s" serve mismatch was the reported cause of a ~62% (vs ~97%)
+# eval. Use --action-normalization quantile_rot + the bundled libero rot6d stats on the
+# server so denormalization matches training.
+#
+# max_samples_per_batch is 128 in the experiment. On lower-memory GPUs reduce at launch:
+#   --opts dataloader_train.max_samples_per_batch=32

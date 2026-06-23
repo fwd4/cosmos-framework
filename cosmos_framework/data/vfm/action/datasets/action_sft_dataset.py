@@ -19,6 +19,7 @@ from typing import Any
 from torch.utils.data import Dataset, IterableDataset, get_worker_info
 
 from cosmos_framework.data.vfm.action.datasets.droid_lerobot_dataset import DROIDLeRobotDataset
+from cosmos_framework.data.vfm.action.datasets.libero_lerobot_dataset import LIBEROLeRobotDataset
 from cosmos_framework.data.vfm.action.transforms import ActionTransformPipeline
 
 
@@ -127,6 +128,84 @@ def get_action_droid_sft_dataset(
         apply_color_jitter=apply_color_jitter,
         use_filter_dict=use_filter_dict,
         filter_dict_path=filter_dict_path,
+    )
+    transform = ActionTransformPipeline(
+        tokenizer_config=tokenizer_config,
+        cfg_dropout_rate=cfg_dropout_rate,
+        max_action_dim=max_action_dim,
+        append_viewpoint_info=append_viewpoint_info,
+        append_duration_fps_timestamps=append_duration_fps_timestamps,
+        append_resolution_info=append_resolution_info,
+        append_idle_frames=append_idle_frames,
+    )
+    sft = ActionSFTDataset(dataset, transform, resolution)
+    if iterable_shuffle:
+        return ActionIterableShuffleDataset(sft, seed=episode_shuffle_seed)
+    return sft
+
+
+def get_action_libero_sft_dataset(
+    *,
+    repo_id: str | list[str] = "lerobot/libero_10",
+    root: str | list[str] | None = None,
+    fps: int = 20,
+    chunk_length: int = 16,
+    image_size: int = 256,
+    mode: str = "policy",
+    camera_mode: str = "concat_view",
+    action_space: str = "frame_wise_relative",
+    rotation_space: str = "6d",
+    pose_coordinate_frame: str = "native",
+    action_normalization: str | None = "quantile_rot",
+    action_stats_path: str | None = None,
+    download_videos: bool = True,
+    split: str = "train",
+    val_ratio: float = 0.01,
+    seed: int = 0,
+    resolution: str | int | None = None,
+    max_action_dim: int = 64,
+    tokenizer_config: dict | None = None,
+    cfg_dropout_rate: float = 0.1,
+    append_viewpoint_info: bool = True,
+    append_duration_fps_timestamps: bool = True,
+    append_resolution_info: bool = True,
+    append_idle_frames: bool = True,
+    iterable_shuffle: bool = False,
+    episode_shuffle_seed: int = 42,
+) -> Dataset:
+    """Build the LIBERO action-policy SFT dataset (GA reproduction defaults).
+
+    Mirrors :func:`get_action_droid_sft_dataset` but feeds ``LIBEROLeRobotDataset``
+    (frame-wise-relative rot6d actions, ``quantile_rot``-normalized, concat_view
+    third-person + wrist at 256x256 each → 256x512) through
+    ``ActionTransformPipeline``. ``repo_id`` / ``root`` accept a single LIBERO
+    suite or a list of suites; for the Table-20 LIBERO-10 reproduction pass only
+    ``libero_10`` (training on the full 4-suite mix dilutes libero_10 to ~1 pass
+    in 2000 steps → ~82% vs ~97% on libero_10 alone).
+    """
+    # An empty string from ``${oc.env:LIBERO_ROOT,}`` means "unset" -> HF download
+    # of ``repo_id`` (default lerobot/libero_10) into the HF cache. Point ``root``
+    # at a local LeRobot conversion to train from disk (recommended on a cluster:
+    # pre-sync once to shared storage to avoid per-rank download races).
+    if isinstance(root, str) and not root.strip():
+        root = None
+    dataset = LIBEROLeRobotDataset(
+        repo_id=repo_id,
+        root=root,
+        download_videos=download_videos,
+        image_size=image_size,
+        chunk_length=chunk_length,
+        fps=fps,
+        mode=mode,
+        split=split,
+        val_ratio=val_ratio,
+        seed=seed,
+        camera_mode=camera_mode,
+        action_space=action_space,
+        rotation_space=rotation_space,
+        pose_coordinate_frame=pose_coordinate_frame,
+        action_normalization=action_normalization,
+        action_stats_path=action_stats_path,
     )
     transform = ActionTransformPipeline(
         tokenizer_config=tokenizer_config,
