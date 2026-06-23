@@ -476,15 +476,29 @@ def _format_action(action: list[float], action_dim: int) -> list[float]:
     return action[:action_dim]
 
 
-def _remap_gripper_to_neg1_pos1(action: list[float]) -> list[float]:
-    """Remap gripper value from [0, 1] (training data range) to [-1, 1] (LIBERO env range).
+def _remap_gripper(action: list[float], mode: str) -> list[float]:
+    """Map the model's gripper command to the LIBERO env's [-1, 1] (negative = open).
 
-    The training dataset stores gripper in [0, 1], but the LIBERO simulation
-    environment expects gripper commands in [-1, 1].  This applies the linear
-    mapping: gripper_env = gripper_model * 2 - 1.
+    The right mapping depends on the gripper convention of the dataset the policy
+    was trained on (the server denormalizes back to that raw convention):
+
+    * ``zero_one`` (NVIDIA LIBERO_LeRobot_v3): raw gripper in [0, 1]; the env wants
+      [-1, 1] with negative=open, so map ``1 - 2g`` (per issue #50). Passing [0,1]
+      raw through would never open.
+    * ``pm_one`` (community ``lerobot/libero_*``): raw gripper already in {-1, +1}
+      (robosuite convention) -> pass through (clamped).
+    * ``pm_one_flip``: {-1, +1} but with inverted open/close sign.
     """
     action = list(action)  # avoid mutating the caller's list
-    action[-1] = max(-1.0, min(1.0, action[-1] * 2.0 - 1.0)) * -1
+    g = action[-1]
+    if mode == "zero_one":
+        action[-1] = max(-1.0, min(1.0, g * 2.0 - 1.0)) * -1.0
+    elif mode == "pm_one":
+        action[-1] = max(-1.0, min(1.0, g))
+    elif mode == "pm_one_flip":
+        action[-1] = max(-1.0, min(1.0, -g))
+    else:
+        raise ValueError(f"Unknown gripper_mode={mode!r}. Use zero_one/pm_one/pm_one_flip.")
     return action
 
 
@@ -568,6 +582,7 @@ def _run_episode(
     action_dim: int,
     action_space: str,
     rotation_space: str,
+    gripper_mode: str,
     max_steps: int,
     warmup_steps: int,
     initial_state: np.ndarray | None,
@@ -675,8 +690,8 @@ def _run_episode(
             )
             action_list = action.tolist()
 
-        # Remap gripper from [0, 1] (model/training range) to [-1, 1] (LIBERO env range)
-        action_list = _remap_gripper_to_neg1_pos1(action_list)
+        # Map the model's gripper command to the env's [-1, 1] per the dataset convention.
+        action_list = _remap_gripper(action_list, gripper_mode)
 
         action_log.append(action_list)
         obs, _, done, info = env.step(action_list)
@@ -748,6 +763,15 @@ def _parse_args() -> argparse.Namespace:
         default="auto",
         choices=["auto", "3d", "6d", "9d"],
         help="Rotation representation for anchored actions (auto infers from action_dim).",
+    )
+    parser.add_argument(
+        "--gripper_mode",
+        type=str,
+        default="zero_one",
+        choices=["zero_one", "pm_one", "pm_one_flip"],
+        help="Gripper convention of the training data: 'zero_one' = [0,1] (NVIDIA "
+        "LIBERO_LeRobot_v3, mapped 1-2g); 'pm_one' = {-1,+1} (community lerobot/libero_*, "
+        "pass-through); 'pm_one_flip' = {-1,+1} with inverted sign.",
     )
     parser.add_argument("--domain_name", type=str, default="libero")
     parser.add_argument(
@@ -912,6 +936,7 @@ def main() -> None:
                     action_dim=args.action_dim,
                     action_space=args.action_space,
                     rotation_space=args.rotation_space,
+                    gripper_mode=args.gripper_mode,
                     max_steps=max_steps,
                     warmup_steps=args.warmup_steps,
                     initial_state=initial_state,
