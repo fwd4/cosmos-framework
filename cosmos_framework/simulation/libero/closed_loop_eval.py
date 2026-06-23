@@ -42,6 +42,7 @@ import random
 import sys
 import time
 from dataclasses import dataclass
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -264,6 +265,33 @@ class ActionEnvironmentClient:
         if "error" in result and result["error"]:
             raise RuntimeError(f"Model server error: {result['error']}")
         return result
+
+    def predict_batch(self, observations: list[list[np.ndarray]]) -> list[list[list[float]]]:
+        """Batched inference: a list of per-env multi-view observations -> ONE
+        POST /predict_batch -> a list of action chunks (one per env). Used by the
+        vectorized eval so N parallel envs share a single diffusion forward."""
+        items = []
+        for obs_imgs in observations:
+            concat = self.concatenate_images(obs_imgs) if len(obs_imgs) > 1 else self.resize_image(obs_imgs[0])
+            items.append(
+                {
+                    "image": self.encode_image_raw(concat),
+                    "prompt": self.prompt,
+                    "domain_name": self.domain_name,
+                    "image_size": self.image_size,
+                }
+            )
+        resp = requests.post(
+            f"{self.server_url}/predict_batch",
+            json={"items": items},
+            headers={"Content-Type": "application/json"},
+            timeout=max(self.timeout, 300.0),
+        )
+        resp.raise_for_status()
+        result = resp.json()
+        if "error" in result and result["error"]:
+            raise RuntimeError(f"Model server error: {result['error']}")
+        return result["actions"]
 
 
 def _find_accessible_dri_nodes() -> list[Path]:
@@ -818,8 +846,158 @@ def _parse_args() -> argparse.Namespace:
         default="DEFAULT",
         help='Path to initial states JSON. Use "DEFAULT" for benchmark defaults.',
     )
+    parser.add_argument(
+        "--num_envs",
+        type=int,
+        default=1,
+        help="Number of parallel LIBERO envs (SubprocVectorEnv). >1 runs trials in waves "
+        "with ONE batched /predict_batch per control step (~num_envs x faster). 1 = serial.",
+    )
     parser.add_argument("--output_dir", type=str, default="", help="Directory to save evaluation summary JSON")
     return parser.parse_args()
+
+
+def _run_task_vectorized(
+    task: Any,
+    task_description: str,
+    *,
+    num_trials: int,
+    num_envs: int,
+    env_image_size: int,
+    seed: int,
+    render_gpu_device_id: int,
+    client: ActionEnvironmentClient,
+    cameras: list[str],
+    flip_images: bool,
+    rotate_180: bool,
+    action_horizon: int,
+    action_dim: int,
+    rotation_space: str,
+    gripper_mode: str,
+    max_steps: int,
+    warmup_steps: int,
+    init_states: list[np.ndarray | None],
+) -> list[dict[str, Any]]:
+    """Run all `num_trials` of one task across `num_envs` parallel LIBERO envs
+    (SubprocVectorEnv), in waves. Each control step gathers obs from the ACTIVE
+    (not-done) envs, issues ONE batched /predict_batch, and steps all active envs;
+    done envs are masked out. Returns per-trial result dicts in trial order with the
+    same shape as the serial path's episode_results."""
+    from libero.libero.envs.venv import SubprocVectorEnv
+
+    resolved_rotation_space = _infer_rotation_space(action_dim, rotation_space)
+    bddl = os.path.join(get_libero_path("bddl_files"), task.problem_folder, task.bddl_file)
+
+    results: list[dict[str, Any]] = [None] * num_trials  # type: ignore[list-item]
+    for t in range(num_trials):
+        if init_states[t] is None:
+            results[t] = {
+                "episode": t,
+                "success": False,
+                "steps": 0,
+                "error": "Skipped due to failed expert demo",
+                "elapsed_s": 0.0,
+            }
+    runnable = [t for t in range(num_trials) if init_states[t] is not None]
+    if not runnable:
+        return results
+
+    n = min(num_envs, len(runnable))
+
+    def make_env_fn(b: str) -> Callable[[], Any]:
+        return lambda: OffScreenRenderEnv(
+            bddl_file_name=b,
+            camera_heights=env_image_size,
+            camera_widths=env_image_size,
+            render_gpu_device_id=render_gpu_device_id,
+        )
+
+    venv = SubprocVectorEnv([make_env_fn(bddl) for _ in range(n)])
+    try:
+        venv.seed(seed)
+        for w0 in range(0, len(runnable), n):
+            wave = runnable[w0 : w0 + n]          # trial indices for this wave
+            slots = list(range(len(wave)))        # env slots in use
+            t_wave0 = time.perf_counter()
+            venv.reset(id=slots)
+            states = np.stack([np.asarray(init_states[t], dtype=np.float64) for t in wave])
+            obs_arr = venv.set_init_state(states, id=slots)
+            obs_by_slot = {s: obs_arr[i] for i, s in enumerate(slots)}
+            done = {s: False for s in slots}
+            succ = {s: False for s in slots}
+            err: dict[int, str | None] = {s: None for s in slots}
+            nsteps = {s: max_steps for s in slots}
+            step = 0
+
+            for _ in range(warmup_steps):
+                act = np.stack([_get_libero_dummy_action() for _ in slots])
+                obs_arr, _, _, _ = venv.step(act, id=slots)
+                for i, s in enumerate(slots):
+                    obs_by_slot[s] = obs_arr[i]
+                step += 1
+
+            while step < max_steps:
+                active = [s for s in slots if not done[s]]
+                if not active:
+                    break
+                obs_batch = [
+                    _get_libero_images(obs_by_slot[s], cameras, flip_images=flip_images, rotate_180=rotate_180)
+                    for s in active
+                ]
+                try:
+                    chunks = client.predict_batch(obs_batch)
+                except Exception as e:  # noqa: BLE001
+                    for s in active:
+                        done[s] = True
+                        err[s] = f"server error: {e}"
+                        nsteps[s] = step
+                    break
+                if not chunks or len(chunks) != len(active):
+                    for s in active:
+                        done[s] = True
+                        err[s] = "bad batch response from server"
+                        nsteps[s] = step
+                    break
+                chunk_by_slot = {s: chunks[k] for k, s in enumerate(active)}
+                horizon = action_horizon if action_horizon > 0 else len(chunks[0])
+                for h in range(horizon):
+                    cur = [s for s in slots if not done[s]]
+                    if not cur or step >= max_steps:
+                        break
+                    env_actions = []
+                    for s in cur:
+                        raw = _format_action(chunk_by_slot[s][h], action_dim)
+                        a = _framewise_action_to_delta(np.asarray(raw, dtype=np.float32), resolved_rotation_space)
+                        env_actions.append(_remap_gripper(a.tolist(), gripper_mode))
+                    obs_arr, _, d, info = venv.step(np.stack(env_actions), id=cur)
+                    step += 1
+                    for i, s in enumerate(cur):
+                        obs_by_slot[s] = obs_arr[i]
+                        di = bool(d[i])
+                        ii = info[i] if isinstance(info, (list, np.ndarray)) else info
+                        is_succ = bool(ii.get("success")) if isinstance(ii, dict) else False
+                        if is_succ:
+                            done[s], succ[s], nsteps[s] = True, True, step
+                        elif di:
+                            # mirror serial: done w/o explicit success defaults to success
+                            done[s] = True
+                            succ[s] = ii.get("success", True) if isinstance(ii, dict) else True
+                            nsteps[s] = step
+            per_ep_elapsed = round((time.perf_counter() - t_wave0) / max(1, len(wave)), 3)
+            for s, t in zip(slots, wave):
+                results[t] = {
+                    "episode": t,
+                    "success": bool(succ[s]),
+                    "steps": int(nsteps[s]),
+                    "error": err[s],
+                    "elapsed_s": per_ep_elapsed,
+                }
+    finally:
+        try:
+            venv.close()
+        except Exception:  # noqa: BLE001
+            pass
+    return results
 
 
 def main() -> None:
@@ -876,6 +1054,74 @@ def main() -> None:
 
     for task_id in selected_task_ids:
         task = task_suite.get_task(task_id)
+
+        # ---- Vectorized path: N parallel envs + one batched /predict_batch per step ----
+        if args.num_envs > 1:
+            task_description = str(task.language)
+            client.prompt = _augment_task_prompt_with_viewpoint(task_description, cameras)
+            init_states = [
+                _load_initial_states(
+                    task_suite,
+                    task_id,
+                    task_description=task_description,
+                    initial_states_path=args.initial_states_path,
+                    episode_idx=e,
+                )
+                for e in range(args.num_trials_per_task)
+            ]
+            episode_results = _run_task_vectorized(
+                task,
+                task_description,
+                num_trials=args.num_trials_per_task,
+                num_envs=args.num_envs,
+                env_image_size=args.env_image_size,
+                seed=args.seed,
+                render_gpu_device_id=args.render_gpu_device_id,
+                client=client,
+                cameras=cameras,
+                flip_images=args.flip_images,
+                rotate_180=args.rotate_180,
+                action_horizon=args.action_horizon,
+                action_dim=args.action_dim,
+                rotation_space=args.rotation_space,
+                gripper_mode=args.gripper_mode,
+                max_steps=max_steps,
+                warmup_steps=args.warmup_steps,
+                init_states=init_states,
+            )
+            task_episodes = 0
+            task_successes = 0
+            for er in episode_results:
+                task_episodes += 1
+                total_episodes += 1
+                if er["success"]:
+                    task_successes += 1
+                    total_successes += 1
+                print(
+                    f"Task {task_id} | Episode {er['episode'] + 1}/{args.num_trials_per_task} | "
+                    f"success={er['success']} steps={er['steps']} elapsed_s={er['elapsed_s']:.1f} | "
+                    f"task SR {task_successes}/{task_episodes} ({100.0 * task_successes / max(1, task_episodes):.1f}%) | "
+                    f"overall SR {total_successes}/{total_episodes} "
+                    f"({100.0 * total_successes / max(1, total_episodes):.1f}%)",
+                    flush=True,
+                )
+            task_success_rate = float(task_successes) / float(task_episodes) if task_episodes > 0 else 0.0
+            task_results.append(
+                {
+                    "task_id": task_id,
+                    "task_description": task_description,
+                    "episodes": task_episodes,
+                    "successes": task_successes,
+                    "success_rate": task_success_rate,
+                    "episode_results": episode_results,
+                }
+            )
+            print(
+                f"Task {task_id} summary: {task_successes}/{task_episodes} ({task_success_rate * 100:.1f}%)",
+                flush=True,
+            )
+            continue
+
         env, task_description = _get_libero_env(
             task,
             resolution=args.env_image_size,
