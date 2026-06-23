@@ -41,11 +41,12 @@ bundled stats.
 **FPS-agnostic.** The loader windows by frame index and decodes video at each
 frame's real timestamp, so it works with any LeRobot LIBERO dataset regardless of
 FPS (no `delta_timestamps` grid). `fps` is metadata only (`conditioning_fps` +
-prompt duration). **Fidelity caveat:** the public `lerobot/libero_*` datasets are
-**10 FPS**, but the bundled `quantile_rot` stats were computed on NVIDIA's **20
-FPS** conversion; per-frame deltas at 10 FPS span 2× the wall-clock motion, so for
-a faithful Table-20 reproduction use a 20 FPS LIBERO dataset (or recompute stats
-for the dataset's FPS). See [§5](#5-fps--stats).
+prompt duration). The public `lerobot/libero_*` datasets are **10 FPS** while the
+bundled `quantile_rot` stats came from NVIDIA's **20 FPS** conversion — but this
+does **not** inherently hurt success rate: normalization is an unclamped affine
+bijection and train+eval share the same stats, so the scale cancels (same reason
+DROID is fine at its own 15 FPS). What matters is train↔eval consistency. See
+[§5](#5-fps--stats).
 
 **Model-input resolution = 192×320.** The 256×512 concat is aspect-2.0, so with
 `resolution=None` the `ActionTransformPipeline` snaps it to the closest `"256"`
@@ -153,10 +154,22 @@ dataset because a 1/20 s grid doesn't land on 10 FPS frames.)
   which the bundled `quantile_rot` stats were computed on. There is no published
   20 FPS LeRobot LIBERO dataset (the LIBERO sim is ~20 Hz, so one is producible
   from the raw HDF5 via `huggingface/lerobot-libero`).
-- **What this means:** at 10 FPS each stored per-frame action delta covers 2× the
-  motion of a 20 FPS step, so the 20 FPS `quantile_rot` stats under-scale 10 FPS
-  actions. For a faithful Table-20 reproduction, either (a) use a 20 FPS LIBERO
-  conversion, or (b) recompute `quantile_rot` stats on the 10 FPS data and bundle
-  them via `action_stats_path`.
+- **Does the FPS gap hurt success rate? Largely no — what matters is train↔eval
+  consistency, not matching 20 FPS.** `normalize_action(quantile)` is an *unclamped*
+  affine map `2(a−q01)/(q99−q01)−1`, and training and the eval server use the *same*
+  stats file, so the absolute scale cancels — 10 FPS deltas just produce
+  larger-than-[-1,1] normalized targets that the model fits and the server inverts
+  exactly. No information is clipped. This is the same reason DROID trains+evals
+  fine at its own 15 FPS: it's self-consistent. So the earlier "stats under-scale"
+  framing overstated the risk.
+- **What you DO need to keep consistent** between training and closed-loop eval:
+  (1) the same stats file + `--action-normalization quantile_rot`; (2) the action
+  *application rate* — actions trained as 10 FPS (0.1 s) deltas must be applied to
+  the env at that cadence (`--action_horizon` + the env step rate), or the arm
+  moves at the wrong speed; (3) resolution + prompt (§4). Get these right and a
+  self-consistent 10 FPS run should learn a strong policy.
+- **Only reason to prefer true 20 FPS:** to reproduce the paper's *exact* dynamics
+  / Table-20 number. Otherwise either (a) a 20 FPS conversion or (b) recomputed
+  10 FPS stats via `action_stats_path` are optional, not required.
 - `fps` in the recipe only sets `conditioning_fps` and the prompt duration; it
   does not change which frames are sampled.

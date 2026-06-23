@@ -69,10 +69,19 @@ class ActionBaseDataset(ABC, Dataset):
             for path in sorted((self._root / "meta" / "episodes").glob("chunk-*/file-*.parquet"))
             for row in pq.read_table(path).to_pylist()
         }
-        self._tasks = {
-            int(row["task_index"]): str(row["task"])
-            for row in pq.read_table(self._root / "meta" / "tasks.parquet").to_pylist()
-        }
+        # ``meta/tasks.parquet`` normally has a ``task`` column. Some LeRobot
+        # conversions (e.g. the community LIBERO datasets) instead store the task
+        # string as the (unnamed) pandas index, which pyarrow surfaces as
+        # ``__index_level_0__``. Fall back to the lone non-``task_index`` field so
+        # both layouts work (datasets that have ``task`` are unaffected).
+        self._tasks = {}
+        for row in pq.read_table(self._root / "meta" / "tasks.parquet").to_pylist():
+            if "task" in row:
+                task = row["task"]
+            else:
+                extras = [v for k, v in row.items() if k != "task_index"]
+                task = extras[0] if extras else ""
+            self._tasks[int(row["task_index"])] = str(task)
         # ``self._rows`` (the flat, index-sorted list of every frame dict) is built
         # lazily on first access — see the ``_rows`` property. Materializing all
         # ~18M frames as Python dicts plus a full sort costs ~13 min and tens of GB;
