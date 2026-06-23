@@ -953,7 +953,9 @@ def main() -> None:
 
             print(
                 f"Task {task_id} | Episode {episode_idx + 1}/{args.num_trials_per_task} | "
-                f"success={result.success} steps={result.steps} elapsed_s={episode_elapsed_s:.1f}",
+                f"success={result.success} steps={result.steps} elapsed_s={episode_elapsed_s:.1f} | "
+                f"task SR {task_successes}/{task_episodes} ({100.0 * task_successes / max(1, task_episodes):.1f}%) | "
+                f"overall SR {total_successes}/{total_episodes} ({100.0 * total_successes / max(1, total_episodes):.1f}%)",
                 flush=True,
             )
 
