@@ -141,13 +141,29 @@ class LIBEROLeRobotDataset(Dataset):
         if self.split not in {"train", "val", "valid", "validation", "eval", "test", "full"}:
             raise ValueError(f"Unsupported {split=}. Use train/val/full.")
 
+        # Align the sampling rate to the dataset's NATIVE fps before building
+        # delta_timestamps. The community ``lerobot/libero_*`` datasets are 10 FPS,
+        # while NVIDIA's internal conversion (which the bundled quantile_rot stats
+        # were computed on) is 20 FPS. Requesting a finer dt than the data supports
+        # makes LeRobot's ``check_delta_timestamps`` reject every window, so clamp
+        # to a frame-aligned rate here.
+        native_fps = self._read_native_fps(root)
+        if native_fps is not None and int(native_fps) != int(self.fps):
+            if self.fps > native_fps or round(native_fps) % round(self.fps) != 0:
+                log.warning(
+                    f"Requested fps={self.fps} is incompatible with dataset native fps={native_fps}; "
+                    f"using native fps={native_fps} for frame sampling. NOTE: the bundled LIBERO "
+                    f"quantile_rot stats were computed on the 20 FPS conversion — for a faithful "
+                    f"reproduction use a 20 FPS LIBERO dataset or recompute stats for this fps."
+                )
+                self.fps = int(native_fps)
+        elif self.fps != 20:
+            log.warning(
+                f"LIBERO frame_wise_relative policy deltas assume 20 FPS; running at fps={self.fps}."
+            )
+
         # Build delta timestamps based on camera mode
         dt = 1.0 / self.fps
-
-        if self.fps != 20:
-            log.warning(
-                f"LIBERO is at 20fps. If using frame_wise_relative for policy mode training, we have to match the fps. fps={self.fps}"
-            )
 
         # Determine which image keys to use
         if self.camera_mode == "image":
@@ -230,6 +246,24 @@ class LIBEROLeRobotDataset(Dataset):
             f"total_frames={total_frames} "
             f"valid_indices={len(self.index_map)}"
         )
+
+    @staticmethod
+    def _read_native_fps(root: str | list[str] | None) -> float | None:
+        """Read the dataset's native FPS from ``<root>/meta/info.json`` when training
+        from a local LeRobot dir. Returns ``None`` for hub-only loads (``root=None``),
+        in which case the requested fps is used as-is and LeRobot validates alignment."""
+        if root is None:
+            return None
+        first = root if isinstance(root, str) else (root[0] if root else None)
+        if not first:
+            return None
+        info_path = Path(first) / "meta" / "info.json"
+        if not info_path.exists():
+            return None
+        try:
+            return float(json.loads(info_path.read_text())["fps"])
+        except (KeyError, ValueError, OSError):
+            return None
 
     def _compute_episode_splits_for_dataset(self, dataset: LeRobotDataset) -> tuple[set[int], set[int]]:
         """Compute train/val episode splits deterministically for a single dataset."""
