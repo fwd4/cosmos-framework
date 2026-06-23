@@ -63,6 +63,10 @@ from PIL import Image
 # Action-specific helpers live in the in-tree project tree. Imports stay as
 # `projects.cosmos3.vfm.*` and are auto-rewritten to `cosmos3._src.vfm.*` by the
 # cosmos-framework release script.
+from cosmos_framework.data.vfm.action.action_processing import (
+    ActionProcessingRecord,
+    make_batched_action_processing_fields,
+)
 from cosmos_framework.data.vfm.action.domain_utils import get_domain_id
 from cosmos_framework.data.vfm.action.transforms import (
     build_sequence_plan_from_mode,
@@ -911,7 +915,13 @@ class ActionModelService:
 
         batch: dict[str, Any] = {
             input_video_key: [[video_padded]],
-            "raw_action_dim": [torch.tensor(self.raw_action_dim, dtype=torch.long)],
+            # Provide BOTH raw_action_dim and the action_processing_record the model
+            # needs to externalize (invert) the generated action; building the batch
+            # by hand previously omitted the record -> "cannot be externalized".
+            **make_batched_action_processing_fields(
+                ActionProcessingRecord(raw_action_dim=self.raw_action_dim, action_normalizer=None),
+                batch_size=1,
+            ),
             "action": [[action_t_d]],
             "mode": ["policy"],
             "ai_caption": [augmented_prompt],
