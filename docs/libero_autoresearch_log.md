@@ -30,7 +30,15 @@ target-hit / budget-exhausted. All runs hold global batch = 128.
 | 2 | b128: batch 128 + `[17]` + cap `-1` (BUGGED) | b128 | iter_2000, envs16 | T8/T9=0 | 60.8% | regressed (my bad edits) |
 | 3 | b128v2: batch 128, policy, durations/cap reverted | b128v2-2dc8 | iter_2000, envs8 | T0 34·T1 90·T2 86·T3 50·T4 86·T5 90·T6 96·T7 88·T8 12·T9 4 | **63.6%** | durations/cap were ~noise (+3pt); **policy frontier @ b128** |
 | 4 | b128joint: batch 128, **mode=joint** | b128joint-66f7 | iter_2000, envs8 | T0 30·T1 60·T2 34·T3 36·T4 26·T5 18·T6 32·T7 50·T8 0·T9 2 | 28.8% | joint dilutes action objective → WORSE; policy wins |
-| 5 | b128long: batch 128, policy, **max_iter=10000, save 1000** (more passes: 2.7→13.5) | b128long ⏳ | sweep 2k–10k ⏳ | — | ⏳ | KEY: does data-exposure (more steps) close the batch-128 gap? |
+| 5 | b128long: batch 128, policy, max_iter=10000 (cycle=10k), save 1000 | b128long-cv48 | sweep 2k–10k | iter_10000: T0 68·T1 98·T2 96·T3 98·T4 94·T5 92·T6 90·T7 100·T8 96·T9 94 | **92.6%** ⬆NEW BEST | **batch 128 IS viable** — SR-vs-passes curve climbs monotonically, T8/T9 craters healed; T0 lone laggard |
+
+### b128 SR-vs-passes curve (run #5, policy, cycle=10k)
+| iter | 2000 | 4000 | 6000 | 8000 | 10000 |
+| passes | 2.7 | 5.4 | 8.0 | 10.8 | 13.5 |
+| overall SR | 63.6% | 79.6% | 89.6% | 90.4% | **92.6%** |
+Monotonic, still rising at 10k (+2.2 over 8k). T8/T9 went 4–12% → 94–96%. Only T0 stuck (68%).
+
+| 6 | b128x20: batch 128, policy, **max_iter=20000 (cycle=20k)**, save 2000 (≈27 passes) | b128x20 ⏳ | sweep 12k–20k ⏳ | — | ⏳ | push past 92.6% toward 97.4%; watch T0 |
 
 ## Candidate knobs (priority order) — ALL at fixed global batch = 128
 **Eval-side (cheap — no retrain; test on existing batch-128 ckpts):**
