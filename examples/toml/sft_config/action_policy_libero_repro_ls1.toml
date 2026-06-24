@@ -1,0 +1,68 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: OpenMDW-1.1
+
+# ============================================================================
+# LIBERO action-policy SFT — "ls1" A/B variant of action_policy_libero_repro.
+#
+# WHAT DIFFERS FROM action_policy_libero_repro.toml:
+#   * Global loss scale removed: loss_scale 10->1 AND action_loss_weight 10->1.
+#     These two live in model.config.rectified_flow_training_config and are NOT
+#     expressible in this TOML schema, so the launch wrapper
+#     (examples/launch_sft_action_policy_libero_ls1.sh) applies them as trailing
+#     Hydra opts. Relative vision:action balance is UNCHANGED (1:1); only the
+#     global magnitude drops 10x. Under FusedAdam a global loss scale is ~no-op
+#     on the update direction (Adam normalizes it out); its only real effect was
+#     saturating grad_clip(clip_norm=1.0). This run tests whether the 10x was
+#     ever doing anything but clipping.
+#   * 2-node HSDP topology to keep the SAME global batch (2048) as run20 while
+#     halving wall-clock: data_parallel_replicate_degree=2 + grad_accum_iter=1
+#     (128 x shard8 x replicate2 x ga1 = 2048, vs run20's 128 x 8 x ga2 x 1).
+#   * 2000 iters, checkpoint every 500 (run20 saved every 1000).
+#
+# Everything else (optimizer, lr=5e-5 + 5x action-head multipliers, LR schedule
+# cycle=10000/warmup=2000 so the per-iter LR matches run20 exactly, count-based
+# batch, dataset knobs, action-head skip-on-load) is identical to repro.toml so
+# this is a clean A/B against run20's 94.6% @ iter_2000.
+#
+# Launch (2 nodes x 8 GPU): bash examples/launch_sft_action_policy_libero_ls1.sh
+# (with NNODES/NODE_RANK/MASTER_ADDR set per node — see the Lepton spec).
+# ============================================================================
+
+[job]
+task         = "vfm"
+experiment   = "action_policy_libero_nano"
+project      = "cosmos3_action_libero"
+group        = "action_sft"
+name         = "action_policy_libero_repro_ls1"
+wandb_mode   = "online"
+
+[model]
+precision = "bfloat16"
+max_num_tokens_after_packing = 74000
+
+[model.parallelism]
+data_parallel_shard_degree     = 8    # shard within each 8-GPU node
+data_parallel_replicate_degree = 2    # 2-node HSDP (replicate across nodes)
+
+[model.activation_checkpointing]
+mode           = "selective"
+save_ops_regex = ["fmha"]
+
+[model.tokenizer]
+vae_path = "${oc.env:WAN_VAE_PATH}"
+
+[optimizer]
+lr = 5.0e-05
+
+[scheduler]
+cycle_lengths = [10000]   # match run20's LR trajectory (NOT max_iter) for a clean A/B
+warm_up_steps = [2000]
+
+[trainer]
+max_iter        = 2000
+logging_iter    = 50
+grad_accum_iter = 1       # global batch = 128 x shard8 x replicate2 x ga1 = 2048 (== run20)
+
+[checkpoint]
+load_path = "${oc.env:BASE_CHECKPOINT_PATH}"
+save_iter = 500           # checkpoint every 500 iters (500/1000/1500/2000)
