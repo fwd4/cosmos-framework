@@ -28,8 +28,9 @@ target-hit / budget-exhausted. All runs hold global batch = 128.
 |---|---|---|---|---|---|---|
 | 1 | run20: batch 2048, policy (reference-faithful) | run20c | iter_2000, envs8 | T0 88·T1 98·T2 96·T3 94·T4 100·T5 92·T6 98·T7 98·T8 90·T9 92 | **94.6%** | baseline; +2.8 to target |
 | 2 | b128: batch 128 + `[17]` + cap `-1` (BUGGED) | b128 | iter_2000, envs16 | T8/T9=0 | 60.8% | regressed (my bad edits) |
-| 3 | b128v2: batch 128, policy, durations/cap reverted | b128v2-2dc8 | iter_2000 ⏳ | — | ⏳ | tests durations/cap (loss == b128 ⇒ expect ~60%) |
-| 4 | b128joint: batch 128, **mode=joint** | b128joint-66f7 | iter_2000 ⏳ | — | ⏳ | tests joint @ small batch |
+| 3 | b128v2: batch 128, policy, durations/cap reverted | b128v2-2dc8 | iter_2000, envs8 | T0 34·T1 90·T2 86·T3 50·T4 86·T5 90·T6 96·T7 88·T8 12·T9 4 | **63.6%** | durations/cap were ~noise (+3pt); **policy frontier @ b128** |
+| 4 | b128joint: batch 128, **mode=joint** | b128joint-66f7 | iter_2000, envs8 | T0 30·T1 60·T2 34·T3 36·T4 26·T5 18·T6 32·T7 50·T8 0·T9 2 | 28.8% | joint dilutes action objective → WORSE; policy wins |
+| 5 | b128long: batch 128, policy, **max_iter=10000, save 1000** (more passes: 2.7→13.5) | b128long ⏳ | sweep 2k–10k ⏳ | — | ⏳ | KEY: does data-exposure (more steps) close the batch-128 gap? |
 
 ## Candidate knobs (priority order) — ALL at fixed global batch = 128
 **Eval-side (cheap — no retrain; test on existing batch-128 ckpts):**
@@ -50,3 +51,10 @@ target-hit / budget-exhausted. All runs hold global batch = 128.
 ## Decisions / notes
 - Batch is fixed at 128. Frontier seeds = rows 3 (b128v2 policy) + 4 (b128joint). Loop starts from
   the better of those once both report; first move = E1 (EMA-eval, free) on the frontier ckpts.
+- **Round 1 verdict (rows 3–4):** policy (63.6%) ≫ joint (28.8%) at batch 128. durations/cap ≈ noise.
+  Frontier = policy. Failure profile: T8/T9 (hardest long-horizon, gripper-heavy) crater (4–12%) while
+  easy tasks are 86–96% → classic UNDERTRAINED policy, consistent with only 2.7 passes at batch 128.
+- **Next (#5, launched):** hold batch 128 + policy; raise `max_iter` 2000→10000 (2.7→13.5 passes),
+  `save_iter=1000`, sweep-eval 2k/4k/6k/8k/10k to get the SR-vs-passes curve in one run. Hypothesis:
+  batch-128 needs ~run20's data exposure (~43 passes) — this probes how fast SR climbs with passes.
+  Parallel free probe: EMA-eval of b128v2 iter_2000 (E1).
