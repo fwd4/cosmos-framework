@@ -69,12 +69,16 @@ trains generation + action heads; action heads init fresh from base (`keys_to_sk
 - *2-node HSDP variant (replicate=2/grad_accum=1, same 2048, ~½ wall-clock) committed in comments;
   not used since two full nodes weren't co-schedulable.*
 
-| Eval | Ckpt | Envs | Episodes | Success |
-|---|---|---|---|---|
-| (pending) | iter_000000500 | — | — | — |
-| (pending) | iter_000001000 | — | — | — |
-| (pending) | iter_000001500 | — | — | — |
-| (pending) | iter_000002000 | — | — | — |
+| Eval | Ckpt | Envs | Episodes | Success | run20 (ls=10) ref |
+|---|---|---|---|---|---|
+| Full | iter_000001000 | 16 | 500 (10×50) | **147/500 = 29.4%** | 199/500 = 39.8% |
+| (pending) | iter_000002000 | 8 | 500 (10×50) | — | 473/500 = 94.6% |
+
+**ls1 iter_1000 per-task:** T0 44 · T1 56 · T2 48 · T3 10 · T4 48 · T5 6 · T6 48 · T7 30 · T8 0 · T9 4.
+**Finding @ iter_1000:** ls1 (loss_scale=1) trails run20 (loss_scale=10) by ~10 pts, gap concentrated in
+slower tasks (T5/T6/T7/T9). Consistent with the hypothesis that loss_scale=10's only real effect — saturating
+grad_clip(norm=1.0) into larger normalized steps — speeds early/warmup training. Decisive comparison is
+iter_2000 (does ls1 catch up to 94.6% as LR peaks, or does the deficit persist?).
 
 ## 4. Eval methodology
 
