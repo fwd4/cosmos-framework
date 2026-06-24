@@ -511,8 +511,11 @@ def _remap_gripper(action: list[float], mode: str) -> list[float]:
     was trained on (the server denormalizes back to that raw convention):
 
     * ``zero_one`` (NVIDIA LIBERO_LeRobot_v3): raw gripper in [0, 1]; the env wants
-      [-1, 1] with negative=open, so map ``1 - 2g`` (per issue #50). Passing [0,1]
-      raw through would never open.
+      [-1, 1] with negative=open. The i4/cosmos-rl reference BINARIZES this to hard
+      {-1, +1} via ``-sign(2g - 1)`` (not the continuous ``1 - 2g`` from issue #50).
+      For a confident policy the two agree (g~0/1), but an undertrained policy emits
+      g~0.5 where continuous ``1-2g``~0 never actuates the gripper -> grasps fail.
+      Binarizing matches the reference and is robust to weak checkpoints.
     * ``pm_one`` (community ``lerobot/libero_*``): raw gripper already in {-1, +1}
       (robosuite convention) -> pass through (clamped).
     * ``pm_one_flip``: {-1, +1} but with inverted open/close sign.
@@ -520,7 +523,8 @@ def _remap_gripper(action: list[float], mode: str) -> list[float]:
     action = list(action)  # avoid mutating the caller's list
     g = action[-1]
     if mode == "zero_one":
-        action[-1] = max(-1.0, min(1.0, g * 2.0 - 1.0)) * -1.0
+        # i4 reference: binarize to hard {-1, +1} via -sign(2g - 1) (negative = open).
+        action[-1] = float(-np.sign(g * 2.0 - 1.0))
     elif mode == "pm_one":
         action[-1] = max(-1.0, min(1.0, g))
     elif mode == "pm_one_flip":

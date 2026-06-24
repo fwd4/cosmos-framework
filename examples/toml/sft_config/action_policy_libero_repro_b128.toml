@@ -34,11 +34,10 @@ wandb_mode   = "online"
 
 [model]
 precision = "bfloat16"
-# Cap REMOVED (per the b128 design): -1 = uncapped. Safe here because each rank
-# packs only 8 samples (~3-5k tokens), far below any budget. (Note: this field
-# has no runtime consumer on the training path anyway — the dataloader packs by
-# max_samples_per_batch count, with token packing disabled via max_sequence_length=None.)
-max_num_tokens_after_packing = -1
+# Keep the reference value 74000 (run20 + reference action_policy_sft_nano use this).
+# An earlier b128 run set this to -1 ("removed") AND encode_exact_durations=[17];
+# both deviated from the reference and regressed the policy to 60.8% (vs 94.6%).
+max_num_tokens_after_packing = 74000
 
 [model.parallelism]
 data_parallel_shard_degree     = 8    # HSDP: model sharded across 8 GPUs (one full node, intra-node NVLink)

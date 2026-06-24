@@ -46,10 +46,14 @@ cs = ConfigStore.instance()
 def _action_policy_libero_nano_model_config() -> dict:
     """GA LIBERO model config: capped packed tokens, selective activation
     checkpointing, fresh diffusion-expert init, 10x vision flow-matching loss, and
-    a single VAE encode duration of 17 frames. This recipe is policy-only
-    (``mode="policy"`` -> ``_choose_mode`` always returns "policy"), so the only
-    window length ever produced is chunk_length=16 -> 17 frames; the forward/
-    inverse-dynamics window lengths only occur under ``mode="joint"``."""
+    the VAE encode durations [17, 61, 73] carried by the Cosmos3 base.
+
+    NOTE: keep ``encode_exact_durations=[17, 61, 73]`` — do NOT reduce it to [17]
+    even though ``mode="policy"`` only produces 17-frame windows at the data level.
+    The public Cosmos3-Nano base was pretrained with [17, 61, 73]; the reference
+    GA LIBERO SFT (``action_policy_sft_nano`` on ``mharrim-nv-patch-1``) retains it,
+    and empirically reducing it to [17] regresses the policy badly
+    (60.8% vs 94.6% at iter 2000)."""
     cfg = copy.deepcopy(NANO_MODEL_CONFIG)  # action_gen=True, max_action_dim=64
     # Cap the packed sequence. Uncapped (-1) + a large max_samples_per_batch packs
     # one very long sequence and OOMs even on H200; 74000 keeps the GA-validated bound.
@@ -58,7 +62,7 @@ def _action_policy_libero_nano_model_config() -> dict:
     cfg["diffusion_expert_config"]["load_weights_from_pretrained"] = False
     cfg["rectified_flow_training_config"]["loss_scale"] = 10.0
     cfg["rectified_flow_training_config"]["image_loss_scale"] = None
-    cfg["tokenizer"]["encode_exact_durations"] = [17]  # policy-only: chunk_length=16 -> 17 frames
+    cfg["tokenizer"]["encode_exact_durations"] = [17, 61, 73]  # match Cosmos3 base + reference SFT (do NOT reduce)
     return cfg
 
 
