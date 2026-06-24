@@ -1,7 +1,12 @@
 # LIBERO-10 SFT autoresearch log
 
 **Goal:** reach **97.4%** overall SR (Table-20) on `libero_10`, 10×50 (500-episode) sharded eval.
-**Baseline to beat:** run20 = 94.6% (batch 2048, policy). **Gap to target: +2.8 pts.**
+**HARD CONSTRAINT: global batch = 128** (≈2.7 passes / 2000 steps — the reporter's regime).
+run20's 94.6% was at batch 2048 and is therefore NOT an admissible solution — it's only a
+reference ceiling. The task: find the batch-128 config that reaches 97.4%.
+
+**Mode of operation:** fully autonomous, budget ≈ 8–10 training runs; ping user on new-best /
+target-hit / budget-exhausted. All runs hold global batch = 128.
 
 ## Method (feedback loop)
 1. Pick next config from the frontier (best-so-far), varying one factor (guided, not random).
@@ -26,18 +31,22 @@
 | 3 | b128v2: batch 128, policy, durations/cap reverted | b128v2-2dc8 | iter_2000 ⏳ | — | ⏳ | tests durations/cap (loss == b128 ⇒ expect ~60%) |
 | 4 | b128joint: batch 128, **mode=joint** | b128joint-66f7 | iter_2000 ⏳ | — | ⏳ | tests joint @ small batch |
 
-## Candidate knobs (priority order)
-**Eval-side (cheap — no retrain):**
-- E1. Checkpoint sweep of run20 (500/1000/1500/2000) — we only evaled iter_2000; a later/earlier ckpt may be higher.
-- E2. More trials (10×50 already; bump seeds / 10×100) to tighten the estimate near 94–97%.
-- E3. Diffusion steps (30→50) / guidance at inference.
+## Candidate knobs (priority order) — ALL at fixed global batch = 128
+**Eval-side (cheap — no retrain; test on existing batch-128 ckpts):**
+- E1. **EMA-eval**: load `net_ema.*` (use_ema_weights) instead of reg net. Checkpoints already store EMA;
+  often +1–3% SR. Re-eval best of {b128v2, b128joint} — NO retrain. Highest cheap-win.
+- E2. Checkpoint sweep 500/1000/1500/2000 (b128v2/joint save every 500) — pick best iter.
+- E3. Diffusion steps 30→50 / guidance at inference.
+- E4. More eval trials / seeds to tighten the estimate near target.
 
-**Training-side (expensive — retrain):**
-- T1. More steps / passes (run20 to 3000–4000 iters).
-- T2. EMA: `load_ema_to_reg=True` (eval EMA weights) vs current reg.
-- T3. lr sweep {3e-5, 5e-5, 1e-4} and warmup.
-- T4. batch size sweep (128 / 512 / 2048) × mode (policy/joint).
-- T5. action_loss_weight / loss_scale ratio.
+**Training-side (retrain, batch=128):**
+- T1. mode = joint vs policy (row 4 tests this).
+- T2. More steps / passes (2000 → 4000 / 6000) — more passes at batch 128.
+- T3. lr sweep {3e-5, 5e-5, 1e-4} + warmup fraction.
+- T4. action_loss_weight / loss_scale ratio.
+- T5. EMA rate / power-EMA schedule (if EMA-eval helps).
+- (batch size is FIXED at 128 — not a knob.)
 
 ## Decisions / notes
-- (pending rows 3–4 results before launching the loop)
+- Batch is fixed at 128. Frontier seeds = rows 3 (b128v2 policy) + 4 (b128joint). Loop starts from
+  the better of those once both report; first move = E1 (EMA-eval, free) on the frontier ckpts.
