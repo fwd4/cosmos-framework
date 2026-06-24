@@ -523,8 +523,7 @@ def _remap_gripper(action: list[float], mode: str) -> list[float]:
     action = list(action)  # avoid mutating the caller's list
     g = action[-1]
     if mode == "zero_one":
-        # i4 reference: binarize to hard {-1, +1} via -sign(2g - 1) (negative = open).
-        action[-1] = float(-np.sign(g * 2.0 - 1.0))
+        action[-1] = max(-1.0, min(1.0, g * 2.0 - 1.0)) * -1.0  # [0,1] -> [-1,1], negative=open (issue #50)
     elif mode == "pm_one":
         action[-1] = max(-1.0, min(1.0, g))
     elif mode == "pm_one_flip":
