@@ -18,7 +18,10 @@ from typing import Any
 
 from torch.utils.data import Dataset, IterableDataset, get_worker_info
 
-from cosmos_framework.data.vfm.action.datasets.droid_lerobot_dataset import DROIDLeRobotDataset
+from cosmos_framework.data.vfm.action.datasets.droid_lerobot_dataset import (
+    DROIDLeRobotDataset,
+    ShardedDROIDLeRobotDataset,
+)
 from cosmos_framework.data.vfm.action.datasets.libero_lerobot_dataset import LIBEROLeRobotDataset
 from cosmos_framework.data.vfm.action.transforms import ActionTransformPipeline
 
@@ -112,11 +115,24 @@ def get_action_droid_sft_dataset(
     append_idle_frames: bool = False,
     iterable_shuffle: bool = False,
     episode_shuffle_seed: int = 42,
+    sharded: bool = False,
+    lerobot_roots: list[str] | None = None,
+    use_success_only: bool = True,
 ) -> Dataset:
     """Build the DROID action SFT dataset: ``action_space='joint_pos'`` (8D) +
-    ``use_state`` (raw/un-normalized), concat_view, chunk_length 32."""
-    dataset = DROIDLeRobotDataset(
-        root=root,
+    ``use_state`` (raw/un-normalized), concat_view, chunk_length 32.
+
+    ``sharded=True`` consumes the per-lab sharded layout (``<root>/success/<lab>``)
+    via :class:`ShardedDROIDLeRobotDataset` — one ``DROIDLeRobotDataset`` per lab
+    concatenated into one flat index — reproducing the internal sharded run's
+    per-shard index construction. ``sharded=False`` (default) reads ``root`` as a
+    single flat LeRobot dataset (the prior behavior). ``lerobot_roots`` optionally
+    pins the shard sub-paths (relative to ``root``); otherwise they are
+    auto-discovered."""
+    # ``sharded`` may arrive as a string from env-var config resolution.
+    if isinstance(sharded, str):
+        sharded = sharded.strip().lower() in ("1", "true", "yes", "on")
+    shard_kwargs = dict(
         fps=fps,
         chunk_length=chunk_length,
         viewpoint=viewpoint,
@@ -129,6 +145,15 @@ def get_action_droid_sft_dataset(
         use_filter_dict=use_filter_dict,
         filter_dict_path=filter_dict_path,
     )
+    if sharded:
+        dataset: Dataset = ShardedDROIDLeRobotDataset(
+            root=root,
+            lerobot_roots=lerobot_roots,
+            use_success_only=use_success_only,
+            **shard_kwargs,
+        )
+    else:
+        dataset = DROIDLeRobotDataset(root=root, **shard_kwargs)
     transform = ActionTransformPipeline(
         tokenizer_config=tokenizer_config,
         cfg_dropout_rate=cfg_dropout_rate,

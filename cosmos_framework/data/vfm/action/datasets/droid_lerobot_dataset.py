@@ -372,3 +372,103 @@ class DROIDLeRobotDataset(ActionBaseDataset):
                 blocks.append((prev, c - prev))
             prev = c
         return blocks
+
+
+class ShardedDROIDLeRobotDataset:
+    """Concatenation of per-lab :class:`DROIDLeRobotDataset` shards.
+
+    The internal DROID success split is published in two layouts of the *same*
+    episodes: a single flat LeRobot (``<root>/{data,meta,videos}``) and a
+    *sharded* layout partitioned by source lab
+    (``<root>/success/{AUTOLab,CLVR,...,WEIRD}/{data,meta,videos}``). The internal
+    ``DROIDLeRobotDataset`` consumes the sharded layout by building a per-shard
+    sample index and concatenating them (mirroring i4's ``LEROBOT_ROOTS[version]``
+    -> ``_all_shard_roots`` + per-shard ``_append_index_records``); the flat layout
+    builds one index over all episodes. Although both cover the identical episodes,
+    the per-shard index construction (per-shard train/val split + per-shard window
+    filtering) yields a different effective sampling distribution and a measurably
+    different (lower) training-loss level. This class reproduces the sharded path:
+    one ``DROIDLeRobotDataset`` per lab sub-root, concatenated into a single flat
+    sample index with uniform sampling (no per-shard reweighting), matching the
+    internal sharded run.
+
+    ``root`` is the sharded dataset dir; lab sub-roots are auto-discovered as
+    ``<root>/success/*`` (when ``use_success_only``) or supplied explicitly via
+    ``lerobot_roots`` (paths relative to ``root``). All other kwargs are forwarded
+    verbatim to each per-shard :class:`DROIDLeRobotDataset`.
+    """
+
+    def __init__(
+        self,
+        root: str,
+        *,
+        lerobot_roots: list[str] | None = None,
+        use_success_only: bool = True,
+        **kwargs: Any,
+    ) -> None:
+        root_path = Path(root)
+        if lerobot_roots is not None:
+            sub_roots = [root_path / r for r in lerobot_roots]
+        elif (root_path / "meta" / "info.json").exists():
+            # ``root`` is itself a single flat LeRobot dataset -> one shard.
+            sub_roots = [root_path]
+        else:
+            split = "success" if use_success_only else "*"
+            sub_roots = sorted(
+                p for p in root_path.glob(f"{split}/*") if (p / "meta" / "info.json").exists()
+            )
+        if not sub_roots:
+            raise FileNotFoundError(
+                f"ShardedDROIDLeRobotDataset: no LeRobot shards (meta/info.json) found under {root_path}"
+            )
+
+        self._shards: list[DROIDLeRobotDataset] = [
+            DROIDLeRobotDataset(root=str(p), **kwargs) for p in sub_roots
+        ]
+        lens = [len(s) for s in self._shards]
+        # offsets[k] = global start index of shard k; offsets[-1] = total length.
+        self._offsets = np.concatenate([[0], np.cumsum(lens)]).astype(np.int64)
+        self._total = int(self._offsets[-1])
+
+    def __getattr__(self, name: str) -> Any:
+        # Forward any non-overridden attribute/method (action_dim, _action_spec,
+        # action_normalization, domain_id, fps, chunk_length, load_action_stats,
+        # viewpoint, ...) to a representative shard; all shards share the same config.
+        shards = self.__dict__.get("_shards")
+        if not shards:
+            raise AttributeError(name)
+        return getattr(shards[0], name)
+
+    @property
+    def mode(self) -> str:
+        return self._shards[0].mode
+
+    @mode.setter
+    def mode(self, value: str) -> None:
+        for shard in self._shards:
+            shard.mode = value
+
+    def __len__(self) -> int:
+        return self._total
+
+    def _route(self, idx: int) -> tuple[DROIDLeRobotDataset, int]:
+        idx = int(idx)
+        k = int(np.searchsorted(self._offsets, idx, side="right")) - 1
+        return self._shards[k], idx - int(self._offsets[k])
+
+    def __getitem__(self, idx: int) -> dict[str, Any]:
+        shard, local = self._route(idx)
+        return shard[local]
+
+    def get_shuffle_blocks(self) -> list[tuple[int, int]]:
+        """Per-shard ``(start, length)`` blocks lifted into the concatenated index
+        space (each shard's blocks offset by its global start). The iterable shuffle
+        then permutes blocks across ALL shards and shards them across ranks/workers,
+        so sampling is uniform over the concatenated index — i.e. all 13 labs pooled,
+        matching the internal sharded run's per-sample-uniform draw."""
+        blocks: list[tuple[int, int]] = []
+        for k, shard in enumerate(self._shards):
+            base = int(self._offsets[k])
+            for start, length in shard.get_shuffle_blocks():
+                blocks.append((base + start, length))
+        return blocks

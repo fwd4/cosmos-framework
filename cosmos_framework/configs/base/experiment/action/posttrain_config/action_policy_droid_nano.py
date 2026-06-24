@@ -212,6 +212,11 @@ action_policy_droid_nano = LazyDict(
                             use_filter_dict=False,
                             filter_dict_path=None,
                             action_normalization=None,
+                            # Sharded (per-lab) dataset layout. False -> read DROID_ROOT as a
+                            # single flat LeRobot (prior behavior). Override to True (and point
+                            # DROID_ROOT at the <...>_sharded dir, which holds success/<lab>/...)
+                            # to reproduce the internal sharded run's per-shard index build.
+                            sharded=False,
                             viewpoint="concat_view",  # wrist 480p (top) + L/R shoulder 320x180 (bottom)
                             resolution="480",  # 640x360 data @ 480p
                             max_action_dim="${model.config.max_action_dim}",
