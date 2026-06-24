@@ -437,6 +437,12 @@ class ActionServerArgs(pydantic.BaseModel):
     checkpoint: tyro.conf.OmitArgPrefixes[CheckpointOverrides] = CheckpointOverrides.model_construct()
     """Checkpoint and config loading configuration."""
 
+    use_ema_weights: bool = True
+    """Load EMA weights (net_ema) into the eval model (load_ema_to_reg). At inference the
+    underlying CheckpointOverrides.use_ema_weights is suppressed (defaults True), so this
+    explicit server flag makes EMA-vs-reg controllable: --no-use-ema-weights evals the
+    raw (non-EMA) net."""
+
     output_dir: Path | None = None
     """Output directory for ``OmniInference`` (saved config.yaml, benchmarks).
     Defaults to ``--dump-dir`` if set, else ``/tmp/cosmos3_action_server``."""
@@ -509,6 +515,7 @@ class ActionServerArgs(pydantic.BaseModel):
         base = OmniSetupOverrides.model_validate(self.checkpoint.model_dump())
         base.output_dir = output_dir
         base.sampler = self.sampler
+        base.use_ema_weights = self.use_ema_weights
         return base
 
 
