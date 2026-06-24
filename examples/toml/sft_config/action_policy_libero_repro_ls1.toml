@@ -14,9 +14,10 @@
 #     on the update direction (Adam normalizes it out); its only real effect was
 #     saturating grad_clip(clip_norm=1.0). This run tests whether the 10x was
 #     ever doing anything but clipping.
-#   * 2-node HSDP topology to keep the SAME global batch (2048) as run20 while
-#     halving wall-clock: data_parallel_replicate_degree=2 + grad_accum_iter=1
-#     (128 x shard8 x replicate2 x ga1 = 2048, vs run20's 128 x 8 x ga2 x 1).
+#   * Single-node topology identical to run20 (replicate=1, grad_accum=2 ->
+#     128 x shard8 x ga2 = 2048 global batch). A 2-node HSDP variant (replicate=2,
+#     grad_accum=1, same 2048) halves wall-clock when two full 8-GPU nodes are
+#     co-schedulable; this run used 1 node as that was what the cluster had free.
 #   * 2000 iters, checkpoint every 500 (run20 saved every 1000).
 #
 # Everything else (optimizer, lr=5e-5 + 5x action-head multipliers, LR schedule
@@ -41,8 +42,8 @@ precision = "bfloat16"
 max_num_tokens_after_packing = 74000
 
 [model.parallelism]
-data_parallel_shard_degree     = 8    # shard within each 8-GPU node
-data_parallel_replicate_degree = 2    # 2-node HSDP (replicate across nodes)
+data_parallel_shard_degree     = 8    # 8-GPU FSDP shard (single node)
+data_parallel_replicate_degree = 1    # 1 node; set 2 for 2-node HSDP (with grad_accum_iter=1)
 
 [model.activation_checkpointing]
 mode           = "selective"
@@ -61,7 +62,7 @@ warm_up_steps = [2000]
 [trainer]
 max_iter        = 2000
 logging_iter    = 50
-grad_accum_iter = 1       # global batch = 128 x shard8 x replicate2 x ga1 = 2048 (== run20)
+grad_accum_iter = 2       # global batch = 128 x shard8 x ga2 = 2048 (== run20)
 
 [checkpoint]
 load_path = "${oc.env:BASE_CHECKPOINT_PATH}"
