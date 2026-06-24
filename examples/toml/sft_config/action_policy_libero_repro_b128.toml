@@ -12,14 +12,14 @@
 # THAT regime exactly and deterministically.
 #
 # GLOBAL BATCH = max_samples_per_batch x (shard x replicate) x grad_accum.
-#   HSDP 4x4 = 16 ranks; max_samples_per_batch=8 (set at launch via
-#   dataloader_train.max_samples_per_batch=8); grad_accum=1
-#   -> 8 x 16 x 1 = 128.  (8 samples/rank is far below any token budget, so no
-#   samples are dropped and the token cap is irrelevant -> removed below.)
+#   HSDP 2x8 = shard8 (within a node) x replicate2 (across 2 nodes) = 16 ranks;
+#   max_samples_per_batch=8 (set at launch via dataloader_train.max_samples_per_batch=8);
+#   grad_accum=1 -> 8 x 16 x 1 = 128. (8 samples/rank is far below any token
+#   budget, so no samples are dropped and the token cap is irrelevant -> removed below.)
 #
 # Loss is the GA default (loss_scale=10, action_loss_weight=10) — NOT overridden.
 #
-# Launch (2 nodes x 8 GPU = HSDP 4x4):
+# Launch (2 nodes x 8 GPU = HSDP 2x8):
 #   bash examples/launch_sft_action_policy_libero_b128.sh
 #   (with NNODES/NODE_RANK/MASTER_ADDR per node — see the Lepton spec).
 # ============================================================================
@@ -41,8 +41,8 @@ precision = "bfloat16"
 max_num_tokens_after_packing = -1
 
 [model.parallelism]
-data_parallel_shard_degree     = 4    # HSDP: model sharded across 4 GPUs
-data_parallel_replicate_degree = 4    # 4 replicas -> 16 ranks total (2 nodes)
+data_parallel_shard_degree     = 8    # HSDP: model sharded across 8 GPUs (one full node, intra-node NVLink)
+data_parallel_replicate_degree = 2    # 2 replicas (one per node) -> 16 ranks total (2 nodes)
 
 [model.activation_checkpointing]
 mode           = "selective"
