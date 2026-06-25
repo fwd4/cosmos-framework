@@ -38,7 +38,18 @@ target-hit / budget-exhausted. All runs hold global batch = 128.
 | overall SR | 63.6% | 79.6% | 89.6% | 90.4% | **92.6%** |
 Monotonic, still rising at 10k (+2.2 over 8k). T8/T9 went 4–12% → 94–96%. Only T0 stuck (68%).
 
-| 6 | b128x20: batch 128, policy, **max_iter=20000 (cycle=20k)**, save 2000 (≈27 passes) | b128x20 ⏳ | sweep 12k–20k ⏳ | — | ⏳ | push past 92.6% toward 97.4%; watch T0 |
+| 6 | b128x20: batch 128, policy, max_iter=20000 (cycle=20k), save 2000 (≈27 passes) | b128x20-8f6f | sweep 16k–20k ⏳ | — | ⏳ | push past 92.6%; watch T0 |
+| 7 | **g2k16k**: GLOBAL BATCH 2048 (HSDP 4x8, 64/rank×32), libero_10, **max_iter=16000** save 1k | g2k16k-64wb ⏳ | sweep ⏳ | — | ⏳ | reference effective batch (2048) + long train; nano==8B model |
+
+### Key finding (MR !8982, EA 1.2 post-training): the 97.5% recipe
+`action_policy_sft_8b.yaml`: **global batch 2048** (max_samples 256 × shard8, 1 node), **4 suites**
+(libero_10/object/spatial/goal), **16000 iters**, FusedAdam 5e-5, LambdaLinear, ema power, policy,
+quantile_rot rot6d, fps20. MR: "97.5% on libero 10 with 1 node." `use_ema_weights` defaults True at
+inference → our evals already load net_ema. **nano recipe == the 8B model** (per user), so #7 reproduces
+the reference's effective batch (2048) at 16k iters (libero_10-only variant), 4× faster via HSDP 4x8.
+
+### EMA verification (run20 iter_2000): in flight
+oss-eval-run20-2k-ema (forced EMA) vs -reg (forced reg) — confirms whether prior evals were EMA + the delta.
 
 ## Candidate knobs (priority order) — ALL at fixed global batch = 128
 **Eval-side (cheap — no retrain; test on existing batch-128 ckpts):**
