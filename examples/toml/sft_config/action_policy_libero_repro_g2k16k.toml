@@ -51,7 +51,7 @@ save_ops_regex = ["fmha"]
 vae_path = "${oc.env:WAN_VAE_PATH}"
 
 [optimizer]
-lr = 5.0e-05
+lr = 2.0e-04
 
 [scheduler]
 cycle_lengths = [16000]   # match the GA LR trajectory (paper used these at batch 128)
