@@ -58,7 +58,7 @@ cycle_lengths = [10000]   # match the GA LR trajectory (paper used these at batc
 warm_up_steps = [100]
 
 [trainer]
-max_iter        = 10000
+max_iter        = 2000
 logging_iter    = 50
 grad_accum_iter = 1       # global = max_samples(64) x 32 ranks x ga1 = 2048
 
