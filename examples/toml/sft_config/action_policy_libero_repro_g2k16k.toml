@@ -1,0 +1,67 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: OpenMDW-1.1
+
+# ============================================================================
+# LIBERO action-policy SFT — "b128" variant: small global batch (128) to match
+# the paper / issue-#50 regime (~2.7 passes over libero_10 in 2000 steps ≈ 97%).
+#
+# WHY: action_policy_libero_repro.toml uses max_samples_per_batch=128 with
+# shard8 x grad_accum2 = GLOBAL BATCH 2048 -> ~43 passes over libero_10's ~95k
+# windows in 2000 steps (heavy over-training). The paper's ~97% was reached with
+# ~2.7 passes, i.e. an effective global batch of ~128. This recipe reproduces
+# THAT regime exactly and deterministically.
+#
+# GLOBAL BATCH = max_samples_per_batch x (shard x replicate) x grad_accum.
+#   HSDP 4x8 = shard8 (within a node) x replicate4 (across 4 nodes) = 32 ranks;
+#   max_samples_per_batch=64 (set at launch via dataloader_train.max_samples_per_batch=64);
+#   grad_accum=1 -> 64 x 32 x 1 = GLOBAL 2048 (== the 97.5% reference's effective batch).
+#   16000 iters on libero_10 alone (save every 1000) -> reference-batch, long-train probe.
+#
+# Loss is the GA default (loss_scale=10, action_loss_weight=10) — NOT overridden.
+#
+# Launch (2 nodes x 8 GPU = HSDP 2x8):
+#   bash examples/launch_sft_action_policy_libero_b128.sh
+#   (with NNODES/NODE_RANK/MASTER_ADDR per node — see the Lepton spec).
+# ============================================================================
+
+[job]
+task         = "vfm"
+experiment   = "action_policy_libero_nano"
+project      = "cosmos3_action_libero"
+group        = "action_sft"
+name         = "action_policy_libero_repro_g2k16k"
+wandb_mode   = "online"
+
+[model]
+precision = "bfloat16"
+# Keep the reference value 74000 (run20 + reference action_policy_sft_nano use this).
+# An earlier b128 run set this to -1 ("removed") AND encode_exact_durations=[17];
+# both deviated from the reference and regressed the policy to 60.8% (vs 94.6%).
+max_num_tokens_after_packing = 74000
+
+[model.parallelism]
+data_parallel_shard_degree     = 8    # shard within each node
+data_parallel_replicate_degree = 4    # HSDP 4x8 = 32 GPUs (4 nodes)
+
+[model.activation_checkpointing]
+mode           = "selective"
+save_ops_regex = ["fmha"]
+
+[model.tokenizer]
+vae_path = "${oc.env:WAN_VAE_PATH}"
+
+[optimizer]
+lr = 5.0e-05
+
+[scheduler]
+cycle_lengths = [16000]   # match the GA LR trajectory (paper used these at batch 128)
+warm_up_steps = [2000]
+
+[trainer]
+max_iter        = 16000
+logging_iter    = 50
+grad_accum_iter = 1       # global = max_samples(64) x 32 ranks x ga1 = 2048
+
+[checkpoint]
+load_path = "${oc.env:BASE_CHECKPOINT_PATH}"
+save_iter = 1000
