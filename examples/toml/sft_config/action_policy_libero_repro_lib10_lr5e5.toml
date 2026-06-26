@@ -1,0 +1,63 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: OpenMDW-1.1
+
+# ============================================================================
+# LIBERO action-policy SFT — "lib10_lr5e5": libero_10-ONLY with the REFERENCE
+# LR recipe (lr 5e-5, warmup 500, cycle 16000), to compare head-to-head against:
+#   - lr1e4c10k (libero_10-only, lr 1e-4, wu 100, cyc 10k): i1000 95.2%, i2000 93.0% (T0 90->70)
+#   - 4suite_lr5e5 (4-suite, SAME lr schedule): i2000 87% (climbing), T0 healthy (94)
+#
+# WHY: the 4-suite run showed the reference's gentler LR (5e-5, wu 500, cyc 16000 ->
+# LR barely decayed at 2k ~4.5e-5) keeps T0 healthy. This run applies that SAME
+# LR trajectory to libero_10 ALONE (full exposure, ~2.7 passes at 2k) — testing
+# whether gentle LR avoids the T0 collapse AND clears 95.2% on libero_10.
+#
+# GLOBAL BATCH = max_samples_per_batch x (shard x replicate) x grad_accum.
+#   HSDP 8x8 = shard8 x replicate8 = 64 ranks; max_samples_per_batch=32 (set at
+#   launch) x ga1 -> 32 x 64 x 1 = GLOBAL 2048.
+#
+# Only delta vs action_policy_libero_repro_4suite_lr5e5.toml: experiment is the
+# libero_10-only recipe (action_policy_libero_nano) + LIBERO_ROOT (single suite).
+#
+# Launch (8 nodes x 8 GPU = HSDP 8x8) via the Lepton spec calling:
+#   bash examples/launch_sft_action_policy_libero_lib10_lr5e5.sh
+# ============================================================================
+
+[job]
+task         = "vfm"
+experiment   = "action_policy_libero_nano"
+project      = "cosmos3_action_libero"
+group        = "action_sft"
+name         = "action_policy_libero_repro_lib10_lr5e5"
+wandb_mode   = "online"
+
+[model]
+precision = "bfloat16"
+max_num_tokens_after_packing = 74000
+
+[model.parallelism]
+data_parallel_shard_degree     = 8    # shard within each node
+data_parallel_replicate_degree = 8    # HSDP 8x8 = 64 GPUs (8 nodes)
+
+[model.activation_checkpointing]
+mode           = "selective"
+save_ops_regex = ["fmha"]
+
+[model.tokenizer]
+vae_path = "${oc.env:WAN_VAE_PATH}"
+
+[optimizer]
+lr = 5.0e-05            # reference lr (same as the 4-suite run)
+
+[scheduler]
+cycle_lengths = [16000] # reference LR trajectory: warmup 500 -> linear decay over 16k
+warm_up_steps = [500]
+
+[trainer]
+max_iter        = 2000  # pause at 2k (LR ~4.5e-5 there — barely decayed); sweep 500..2000
+logging_iter    = 50
+grad_accum_iter = 1     # global = max_samples(32) x 64 ranks x ga1 = 2048
+
+[checkpoint]
+load_path = "${oc.env:BASE_CHECKPOINT_PATH}"
+save_iter = 500         # sweep 500/1000/1500/2000
