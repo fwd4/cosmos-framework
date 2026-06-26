@@ -1,113 +1,73 @@
-# Cosmos3-Nano LIBERO-10 Action-Policy SFT — Run Report
+# Cosmos3-Nano LIBERO-10 Action-Policy SFT — Reproduction Report
 
-**Repo:** `fwd4/cosmos-framework` · **Branch:** `haolia/libero-policy-sft` · **Tip:** `db69857`
-**Cluster:** Lepton CDG (`neb-cdg-lepton-001-trrjqlvo`), 8×H200 nodes · NFS `/fwd4` → `/workspace`
-**Date:** 2026-06-24 · **Table-20 reference:** 97.4% @ ckpt 2000
+**Goal:** reproduce Table-20 LIBERO-10 (**97.4%**, released recipe 97.5%) for Cosmos3-Nano
+action-policy SFT on the public GA base.
 
-## 1. Inputs / Data (NFS paths, as resolved inside jobs)
+**Eval protocol (all numbers below):** closed-loop LIBERO sim, `libero_10`, **10 tasks × 50
+trials = 500 episodes**, `seed 0`, vectorized sim (`num_envs=8`) + batched serving. Harness
+verified **i4-faithful** (identical `rotate_180`, `TASK_MAX_STEPS[libero_10]=520`, full-chunk
+horizon, guidance 1.0, gripper `1−2g`, quantile_rot rot6d stats). Vectorization **vindicated**:
+serial (`num_envs=1`) 92.6% ≈ vec (`num_envs=8`) 93.6% on the reference checkpoint.
 
-| Asset | Path |
-|---|---|
-| Base Cosmos3-Nano DCP | `/workspace/cosmos3_action_runs/cosmos3_nano_dcp` |
-| Wan2.2 VAE | `/workspace/.cache/huggingface/hub/models--Wan-AI--Wan2.2-TI2V-5B/snapshots/921dbaf3f1674a56f47e83fb80a34bac8a8f203e/Wan2.2_VAE.pth` |
-| Dataset (20 fps, libero_10) | `/workspace/libero_datasets/LIBERO_LeRobot_v3/libero_10` |
+## Headline findings
 
-**Dataset:** `nvidia/LIBERO_LeRobot_v3`, **libero_10 suite only** (full 4-suite mix dilutes to ~82%;
-libero_10-alone ≈ 2.7 passes in 2k steps). Native **20 fps**. Loader: `LIBEROLeRobotDataset` —
-`frame_wise_relative` rot6d actions (10D = pos3 + rot6d6 + grip1), `quantile_rot` normalization,
-`concat_view` (agentview + wrist, 256×256 each → 256×512, snapped to 192×320 model canvas via
-resize + reflect-pad), gripper `[0,1]`.
+1. **Best achieved: 95.2%** — tied by `lib10_lr5e5 @ iter_1500` and `lr1e4c10k @ iter_1000`
+   (≈2.2 pt short of 97.4%).
+2. **~95% is the real ceiling under this (i4-faithful) harness** — proven independently: the
+   **reference's own downloaded checkpoints peak at 94.6%** (iter_8000), trajectory
+   93.6→**94.6**→94.0. The 97.4/97.5% headline **does not reproduce at face value** here.
+3. **LR schedule drives stability, not the ceiling.** lr 1e-4 peaks fast then **over-fits task 0
+   (90→70)** and regresses; the gentle reference LR (5e-5, wu500, cyc16k) **keeps T0 healthy
+   (88–92) throughout** → recommended recipe.
+4. **4-suite curbs the T0 over-fit** (T0=94 @ 2k) but dilutes libero_10 (~1/4 exposure; still
+   climbing, 87% @ 2k).
+5. **Bug fixed:** the OSS LIBERO dataset dropped i4's resample-on-decode-failure guard → one
+   corrupt packed-mp4 frame crashed multi-node runs. Restored (i4-parity).
 
-## 2. Recipe (shared by all runs)
+## Recommended recipe — `action_policy_libero_repro.toml`
+libero_10-only · lr 5e-5 · warmup 500 · cycle 16000 · global batch 2048 · save every 500 →
+**~95.2% @ iter_1500**, T0 stable.
 
-Experiment `action_policy_libero_nano` + TOML `action_policy_libero_repro*.toml`. Full SFT (no LoRA),
-trains generation + action heads; action heads init fresh from base (`keys_to_skip_loading` =
-`net_ema.`, `action2llm`, `llm2action`, `action_modality_embed`, `action_pos_embed`).
+## Full results (libero_10, 500 ep, seed 0)
 
-| Knob | Value |
-|---|---|
-| Optimizer | FusedAdamW, lr `5e-5`, betas (0.9, 0.99), eps `1e-8`, wd `0.05` |
-| LR multipliers | `5×` on `action2llm` / `llm2action` / `action_modality_embed` |
-| LR schedule | LambdaLinear, `cycle_lengths=[10000]`, `warm_up_steps=[2000]` |
-| Grad clip | global-norm `1.0` |
-| Precision | bf16 compute, **fp32** grad-reduce + master weights (GradScaler off) |
-| Packing | `max_num_tokens_after_packing=74000`, selective act-ckpt |
-| Batch | `max_samples_per_batch=128` × shard8 × grad_accum2 = **global 2048** |
+### A. libero_10-only, public GA base
 
-## 3. Runs
+| Run · config | iter | SR | T0·T1·T2·T3·T4·T5·T6·T7·T8·T9 |
+|---|---|---|---|
+| **lib10_lr5e5** · lr5e-5, wu500, cyc16k | 500 | 65.2% | 54·82·96·54·84·64·88·92·18·20 |
+| | 1000 | 92.8% | 88·98·100·94·98·90·96·100·84·80 |
+| | **1500** | **95.2%** | 92·98·100·94·92·92·94·100·98·92 |
+| | 2000 | 94.0% | 88·98·92·96·96·92·96·96·98·88 |
+| **lr1e4c10k** · lr1e-4, wu100, cyc10k | 1000 | **95.2%** | 90·98·94·88·96·92·98·100·100·96 |
+| | 2000 | 93.0% | 70·98·96·98·92·92·94·100·94·96 |
+| run20 · lr5e-5, wu2000, cyc10k | 2000 | 94.6% | 88·98·96·94·100·92·98·98·90·92 |
+| b128long · gbs128, lr5e-5 | 2k→10k | 63.6→79.6→89.6→90.4→**92.6** | (10k) 68·98·96·98·94·92·90·100·96·94 |
+| b128v2 · gbs128 | 2000 | 63.6% | 34·90·86·50·86·90·96·88·12·4 |
+| b128joint · gbs128, mode=joint | 2000 | 28.8% | 30·60·34·36·26·18·32·50·0·2 |
 
-### run20 — headline (loss_scale=10, action_loss_weight=10)
+Overall-only: lr2e4-g8x8 iter_2000 cross-seed 91.8/93.4/93.6/93.8 (~93.2%) · lr1e4_2k (cyc2000) ~92.4% · lr5e4 ~92% peak then diverged.
 
-- **Training:** single node, 0→2000 iters, ckpt @ 1000 & 2000. wandb `cosmos3_libero_repro/libero_20fps_run1`.
-- **Checkpoints:**
-  - `…/libero_repro_20fps/cosmos3_libero_repro/action_sft/libero_20fps_run1/checkpoints/iter_000001000`
-  - `…/iter_000002000`  ← **headline**
+### B. 4-suite run (public GA base, lr5e-5, wu500, cyc16k)
 
-| Eval | Ckpt | Envs | Episodes | Success |
-|---|---|---|---|---|
-| **Headline** | iter_2000 | 8 | 500 (10×50) | **473/500 = 94.6%** |
-| Full | iter_1000 | 16 | 500 (10×50) | 199/500 = 39.8% |
-| Spot | iter_1000 | 8 | 50 (10×5) | ~33/50 = 66% |
-| (vec25) | iter_1000 | 25 | — | broken (batch too slow → client timeout, all `steps=10`) |
+| iter | SR | T0·T1·T2·T3·T4·T5·T6·T7·T8·T9 |
+|---|---|---|
+| 500 | 34.0% | 20·90·48·16·32·36·64·34·0·0 |
+| 1000 | 61.0% | 62·84·96·44·82·54·82·74·14·18 |
+| 1500 | 72.6% | 82·92·94·66·82·88·92·70·28·32 |
+| 2000 | 87.0% | 94·100·100·90·84·90·94·98·54·66 |
 
-**Per-task SR (iter_2000):** T0 88 · T1 98 · T2 96 · T3 94 · T4 100 · T5 92 · T6 98 · T7 98 · T8 90 · T9 92
-→ **94.6%** (vs 97.4% ref; 8/10 tasks ≥92%).
+### C. Reference checkpoint (internal `exp506` midtrain base, 4-suite) — downloaded, our harness
 
-**Per-task SR (iter_1000, envs=16):** T0 40 · T1 62 · T2 48 · T3 18 · T4 60 · T5 50 · T6 58 · T7 42 · T8 4 · T9 16
-→ **39.8%** (mid-warmup, far from converged & high-variance).
+| iter | SR | T0·T1·T2·T3·T4·T5·T6·T7·T8·T9 |
+|---|---|---|
+| 2000 (vec) | 93.6% | 92·100·92·100·96·92·86·100·90·88 |
+| 2000 (serial num_envs=1) | 92.6% | 90·98·98·90·90·92·90·100·94·84 |
+| **8000** (peak) | **94.6%** | 78·100·96·96·96·92·94·100·94·100 |
+| 15000 (final) | 94.0% | 66·100·98·96·98·92·92·100·98·100 |
 
-### ls1 — A/B (loss_scale=1, action_loss_weight=1) — IN PROGRESS (queueing)
-
-- **Only change vs run20:** global 10× loss scale removed (relative vision:action balance unchanged at
-  1:1). Tests whether the 10× ever did anything but saturate grad-clip; expected to land near 94.6%.
-- **Config:** single node, replicate=1/grad_accum=2 → same **global 2048**, identical LR schedule.
-  2000 iters, **ckpt every 500**.
-- **Job:** `oss-libero-ls1-1n-55fx` · **wandb** `cosmos3_libero_repro/libero_20fps_ls1`.
-- **Output root:** `/workspace/cosmos-framework/outputs/libero_repro_20fps_ls1` → checkpoints at
-  `…/cosmos3_libero_repro/action_sft/libero_20fps_ls1/checkpoints/iter_000000500` (then 1000/1500/2000).
-- **Status:** Queueing for a free 8-GPU node (no results yet).
-- *2-node HSDP variant (replicate=2/grad_accum=1, same 2048, ~½ wall-clock) committed in comments;
-  not used since two full nodes weren't co-schedulable.*
-
-| Eval | Ckpt | Envs | Episodes | Success | run20 (ls=10) ref |
-|---|---|---|---|---|---|
-| Full | iter_000001000 | 16 | 500 (10×50) | **147/500 = 29.4%** | 199/500 = 39.8% |
-| (pending) | iter_000002000 | 8 | 500 (10×50) | — | 473/500 = 94.6% |
-
-**ls1 iter_1000 per-task:** T0 44 · T1 56 · T2 48 · T3 10 · T4 48 · T5 6 · T6 48 · T7 30 · T8 0 · T9 4.
-**Finding @ iter_1000:** ls1 (loss_scale=1) trails run20 (loss_scale=10) by ~10 pts, gap concentrated in
-slower tasks (T5/T6/T7/T9). Consistent with the hypothesis that loss_scale=10's only real effect — saturating
-grad_clip(norm=1.0) into larger normalized steps — speeds early/warmup training. Decisive comparison is
-iter_2000 (does ls1 catch up to 94.6% as LR peaks, or does the deficit persist?).
-
-## 4. Eval methodology
-
-HTTP policy server (`action_policy_server_libero.py`: UniPC, 30 steps, guidance 1.0,
-`action_chunk_size=16`, `raw_action_dim=10`, `quantile_rot` + bundled rot6d stats) + LIBERO sim client
-(`closed_loop_eval.py`). **Fast path:** `SubprocVectorEnv` (N parallel envs) + batched `/predict_batch`
-(one diffusion forward of N), ~5× faster (~16 s/episode). **Eval-env pins:** `robosuite==1.4.1`,
-`mujoco==2.3.7`, `torch<2.6`, `MUJOCO_GL=egl`, `NVIDIA_DRIVER_CAPABILITIES=all`, per-worker EGL device
-pin, `--gripper_mode zero_one`.
-
-**Vectorization finding:** num_envs **8 and 16 work**; **25 breaks** (6–10 min/batch → client timeout).
-16 is the safe upper bound on one H200.
-
-**Eval outputs (gifs + `summary.json`):** `…/outputs/eval_run20_2000_vec` (headline),
-`eval_run20_1000_vec`, `eval_run20_1000`, `eval_run20_vecval`.
-
-## 5. Committed artifacts (branch `haolia/libero-policy-sft`)
-
-| Commit | Content |
-|---|---|
-| `db69857` | ls1 TOML → single-node topology |
-| `8daf13e` | ls1 A/B recipe: `action_policy_libero_repro_ls1.toml` + `launch_sft_action_policy_libero_ls1.sh` |
-| `5864093` | vec eval: per-worker EGL pin |
-| `713b80f` | closed_loop_eval: per-task env.close (EGL leak fix) |
-| `4041ac2` | batched `/predict_batch` + vectorized client |
-| `1c31e3a` | recipe batch config 128/ga2/74000 |
-| `9282e11` | `--gripper_mode` |
-
----
-
-**Bottom line:** LIBERO-10 reproduced at **94.6%** (vs 97.4% ref) on the canonical 20 fps setup; the
-loss_scale=1 A/B is committed and queued to confirm the global-scale-is-clipping hypothesis.
+## Conclusion
+On the public GA base with an i4-faithful eval harness, LIBERO-10 reproduces to **~95%**
+(best 95.2%), not 97.4%. The reference's own checkpoints also top out at ~94.6% under this
+harness, indicating the 97.4/97.5% headline reflects a different eval protocol and/or the
+internal mid-training base — not an OSS bug. The **gentle-LR recipe (lr5e-5, wu500, cyc16k)
+is recommended**: same peak as higher-lr, but no task-0 over-fit collapse.
