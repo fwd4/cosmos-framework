@@ -259,6 +259,22 @@ class LIBEROLeRobotDataset(ActionBaseDataset):
     # ---- sample build ------------------------------------------------------
 
     def __getitem__(self, idx: int) -> dict[str, Any]:
+        # Resilience: a single unreadable/corrupt video frame (e.g. a torchcodec
+        # decode error on the packed LeRobot-v3 mp4s) must not crash a multi-node
+        # run. Resample a different valid window on failure (bounded retries).
+        n = len(self)
+        last_err: Exception | None = None
+        for _attempt in range(8):
+            try:
+                return self._build_item(idx)
+            except Exception as e:  # noqa: BLE001 — skip past undecodable frames
+                last_err = e
+                log.warning(f"LIBERO: sample idx={idx} failed to load ({type(e).__name__}: {e}); resampling")
+                if n > 0:
+                    idx = random.randint(0, n - 1)
+        raise RuntimeError(f"LIBERO: failed to load a sample after 8 resamples; last error: {last_err}")
+
+    def _build_item(self, idx: int) -> dict[str, Any]:
         mode = self._choose_mode()
         idx = int(idx)
         ep = int(np.searchsorted(self._valid_cum, idx, side="right"))
