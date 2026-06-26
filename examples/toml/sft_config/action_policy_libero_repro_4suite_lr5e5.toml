@@ -1,0 +1,68 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: OpenMDW-1.1
+
+# ============================================================================
+# LIBERO action-policy SFT — "4suite_lr5e5": reproduce the reference 97%+ DATA
+# regime (wandb hqwbt7ve) on the public GA base.
+#
+# WHY: the libero_10-only recipe peaks ~95% then OVERFITS task 0 by iter 2000
+# (90% -> 70%). The reference (...exp506_midtraining_v1...16k_lr5e5_wu500) avoids
+# this by training the FULL 4-suite mix (libero_10/object/spatial/goal, equal
+# ratio) at lr 5e-5 for 16k iters. This recipe matches that data + schedule on
+# the public Cosmos3-Nano GA base (the reference's internal exp506 mid-training
+# base is NOT used here — this isolates the effect of 4-suite + lr5e-5).
+#
+# DIFFERENCES vs the reference (deliberate / unavoidable):
+#   - base = public Cosmos3-Nano (GA), not exp506 midtraining_v1 iter_40000
+#   - dataset = nvidia/LIBERO_LeRobot_v3, not the *_no_noops_*_aligned variant
+#
+# GLOBAL BATCH = max_samples_per_batch x (shard x replicate) x grad_accum.
+#   HSDP 8x8 = shard8 (within a node) x replicate8 (across 8 nodes) = 64 ranks;
+#   max_samples_per_batch=32 (set at launch) x ga1 -> 32 x 64 x 1 = GLOBAL 2048
+#   (== the reference's effective batch). 4 suites at 1:1:1:1 -> libero_10 gets
+#   ~1/4 the exposure per step, hence the long (16k) schedule.
+#
+# Loss is the GA default (loss_scale=10, action_loss_weight=10) — NOT overridden.
+#
+# Launch (8 nodes x 8 GPU = HSDP 8x8) via the Lepton spec calling:
+#   bash examples/launch_sft_action_policy_libero_4suite_lr5e5.sh
+# ============================================================================
+
+[job]
+task         = "vfm"
+experiment   = "action_policy_libero_nano_4suite"
+project      = "cosmos3_action_libero"
+group        = "action_sft"
+name         = "action_policy_libero_repro_4suite_lr5e5"
+wandb_mode   = "online"
+
+[model]
+precision = "bfloat16"
+max_num_tokens_after_packing = 74000
+
+[model.parallelism]
+data_parallel_shard_degree     = 8    # shard within each node
+data_parallel_replicate_degree = 8    # HSDP 8x8 = 64 GPUs (8 nodes)
+
+[model.activation_checkpointing]
+mode           = "selective"
+save_ops_regex = ["fmha"]
+
+[model.tokenizer]
+vae_path = "${oc.env:WAN_VAE_PATH}"
+
+[optimizer]
+lr = 5.0e-05            # reference lr (half of the libero_10-only lr1e4 run)
+
+[scheduler]
+cycle_lengths = [16000] # reference LR trajectory: warmup 500 -> linear decay to 0 over 16k
+warm_up_steps = [500]
+
+[trainer]
+max_iter        = 16000
+logging_iter    = 50
+grad_accum_iter = 1     # global = max_samples(32) x 64 ranks x ga1 = 2048
+
+[checkpoint]
+load_path = "${oc.env:BASE_CHECKPOINT_PATH}"
+save_iter = 2000        # sweep 2k/4k/.../16k to find the libero_10 peak
