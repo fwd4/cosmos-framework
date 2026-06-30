@@ -33,7 +33,7 @@ TOML_FILE="examples/toml/sft_config/action_policy_libero_repro.toml"
 # export it so torchrun (launched in this shell) inherits it.
 export LIBERO_ROOT="${LIBERO_ROOT:-}"
 
-EXTRA_DATASET_CHECK='[[ -f "$LIBERO_ROOT/meta/info.json" ]] || { echo "ERROR: LIBERO_ROOT must be a local LeRobot dir containing meta/info.json (got: '\''$LIBERO_ROOT'\''). Pre-sync: hf download nvidia/LIBERO_LeRobot_v3 --repo-type dataset --include '\''libero_10/**'\'' --local-dir <dir> (then LIBERO_ROOT=<dir>/libero_10). See docs/action_policy_libero_sft.md" >&2; exit 1; }'
+EXTRA_DATASET_CHECK='[[ -f "$LIBERO_ROOT/meta/info.json" ]] || [[ -f "$LIBERO_ROOT/libero_10/meta/info.json" ]] || { echo "ERROR: LIBERO_ROOT must be a local LeRobot dir with meta/info.json (single suite, e.g. <dir>/libero_10) or a parent dir of libero_* suites (libero-all mix); got: '\''$LIBERO_ROOT'\''. Pre-sync: hf download nvidia/LIBERO_LeRobot_v3 --repo-type dataset --include '\''libero_10/**'\'' --local-dir <dir>. See docs/action_policy_libero_sft.md" >&2; exit 1; }'
 
 # Extra Hydra overrides from the environment: a space-separated string word-split into
 # the TAIL_OVERRIDES array. An exported string survives `bash <wrapper>` (a child
