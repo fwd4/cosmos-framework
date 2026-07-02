@@ -101,6 +101,7 @@ def get_action_droid_sft_dataset(
     use_image_augmentation: bool = False,
     use_filter_dict: bool = False,
     filter_dict_path: str | None = None,
+    use_success_only: bool = True,
     resolution: str | int = "256",
     max_action_dim: int = 64,
     tokenizer_config: dict | None = None,
@@ -126,6 +127,7 @@ def get_action_droid_sft_dataset(
         use_image_augmentation=use_image_augmentation,
         use_filter_dict=use_filter_dict,
         filter_dict_path=filter_dict_path,
+        use_success_only=use_success_only,
     )
     transform = ActionTransformPipeline(
         tokenizer_config=tokenizer_config,

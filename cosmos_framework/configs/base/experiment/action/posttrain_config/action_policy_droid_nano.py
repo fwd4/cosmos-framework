@@ -207,6 +207,10 @@ action_policy_droid_nano = LazyDict(
                             # set use_filter_dict=True + filter_dict_path to enable.
                             use_filter_dict=False,
                             filter_dict_path=None,
+                            # i4 lazy dataset keys the root on a LEROBOT_ROOTS version
+                            # (e.g. droid_plus_lerobot_640x360_20260412); use_success_only
+                            # filters to the success/ split of that versioned root.
+                            use_success_only=True,
                             action_normalization=None,
                             viewpoint="concat_view",  # wrist 480p (top) + L/R shoulder 320x180 (bottom)
                             resolution="480",  # 640x360 data @ 480p
