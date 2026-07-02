@@ -21,15 +21,14 @@ import copy
 
 from hydra.core.config_store import ConfigStore
 
-from cosmos_framework.utils.lazy_config import LazyCall as L
-from cosmos_framework.utils.lazy_config import LazyDict
-
 from cosmos_framework.configs.base.experiment.sft.models.nano_model_config import NANO_MODEL_CONFIG
+from cosmos_framework.data.generator.action.datasets.action_sft_dataset import get_action_droid_sft_dataset
 from cosmos_framework.data.generator.joint_dataloader import (
     PackingDataLoader,
     RankPartitionedDataLoader,
 )
-from cosmos_framework.data.generator.action.datasets.action_sft_dataset import get_action_droid_sft_dataset
+from cosmos_framework.utils.lazy_config import LazyCall as L
+from cosmos_framework.utils.lazy_config import LazyDict
 
 cs = ConfigStore.instance()
 
@@ -207,6 +206,10 @@ action_policy_droid_nano = LazyDict(
                             # set use_filter_dict=True + filter_dict_path to enable.
                             use_filter_dict=False,
                             filter_dict_path=None,
+                            # i4 lazy dataset keys the root on a LEROBOT_ROOTS version
+                            # (e.g. droid_plus_lerobot_640x360_20260412); use_success_only
+                            # filters to the success/ split of that versioned root.
+                            use_success_only=True,
                             action_normalization=None,
                             viewpoint="concat_view",  # wrist 480p (top) + L/R shoulder 320x180 (bottom)
                             resolution="480",  # 640x360 data @ 480p
